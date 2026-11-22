@@ -1,17 +1,3 @@
-TwinGate 许可证
-================
-
-本项目自身代码（src/tgmux.c、scripts/、tgmenu.sh、tests/ 等，以下统称“本项目”）
-采用 GNU Lesser General Public License version 2.1 或（由您选择）任何更新版本，
-即 LGPL-2.1-or-later。
-
-LGPLv2.1 的条款引用 GNU General Public License version 2 的条款，因此本文件先给出
-LGPLv2.1 官方全文，再附上 GPLv2 官方全文；两者共同构成本项目的完整许可条款。
-
-本项目所依赖的上游组件（3proxy、ttp、BearSSL）不随本仓库分发源码，且各有自己的
-许可证，详见 THIRD_PARTY_NOTICES.md。本项目未修改任何上游源码。
-
--------------------------------------------------------------------------------
 
                   GNU LESSER GENERAL PUBLIC LICENSE
                        Version 2.1, February 1999
