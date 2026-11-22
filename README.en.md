@@ -200,17 +200,6 @@ sh scripts/stop.sh
 `vendor/` is not committed (about 24 MB of upstream sources). After cloning, run
 `sh scripts/fetch-vendor.sh` to fetch the pinned commits.
 
-Sync sources to a ReDroid container:
-
-```sh
-sh push.sh                              # first adb device by default
-ADB_SERIAL=localhost:5555 sh push.sh    # specify a serial with multiple devices
-```
-
-The pushed zip excludes `dist/`, private keys, `ttp.env` and `config/tui.env`; it does
-not delete the project directory on the device, so already-built binaries, certificates
-and local settings there are preserved.
-
 Environment override examples:
 
 ```sh

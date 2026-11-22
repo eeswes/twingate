@@ -162,15 +162,6 @@ sh scripts/stop.sh
 
 `vendor/` 不入库（约 24 MB 上游源码）。克隆仓库后先执行 `sh scripts/fetch-vendor.sh` 拉取固定提交。
 
-同步源码到 ReDroid 容器：
-
-```sh
-sh push.sh                              # 默认连第一个 adb 设备
-ADB_SERIAL=localhost:5555 sh push.sh    # 多设备时指定序列号
-```
-
-推送的 zip 不含 `dist/`、私钥、`ttp.env` 和 `config/tui.env`，也不会删除容器里的项目目录，容器内已构建的二进制、证书和本地配置不会被覆盖。
-
 环境变量覆盖示例：
 
 ```sh
