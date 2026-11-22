@@ -1,0 +1,33 @@
+# 构建产物（必须在容器内重新构建）
+/dist/
+/build/
+
+# 运行时状态与日志
+/logs/
+/run/*.pid
+/run/3proxy.cfg
+/run/listen-ports
+/run/runtime-dir
+/run/services
+
+# 证书材料全部由 scripts/gen-certs.sh 本地生成，不入库
+/run/certs/*.key
+/run/certs/*.crt
+/run/certs/*.csr
+/run/certs/*.srl
+/run/certs/*.cnf
+/run/certs/ttp.env
+
+# 用户本地配置（服务开关、端口、探测设置）
+/config/tui.env
+
+# 上游源码由 scripts/fetch-vendor.sh 拉取，不入库
+/vendor/
+
+# 同步与临时文件
+/twingate.zip
+/.Trash-0/
+/tests/__pycache__/
+*.pyc
+*.o
+*.log
