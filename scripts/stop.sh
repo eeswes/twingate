@@ -2,7 +2,9 @@
 # 停止 TwinGate 全部进程。
 set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-RUNDIR=${TWIN_RUN_DIR:-$ROOT/run}
+. "$ROOT/scripts/paths.sh"
+twin_init_paths "$0"
+RUNDIR=${TWIN_RUN_DIR:-$TWIN_DATA/run}
 PIDS=""
 for pidfile in "$RUNDIR"/*.pid; do
     [ -f "$pidfile" ] || continue

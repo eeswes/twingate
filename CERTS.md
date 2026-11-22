@@ -24,6 +24,8 @@ sh scripts/gen-certs.sh
 ```
 
 然后在每个客户端**只导入一次 `run/certs/ca.crt`**。
+若已通过 `make install` 安装为单命令，证书目录改为 `~/.local/share/twingate/certs/`，
+用 `twingate certs` 生成、用 `twingate trust` 导入本机；下文的 `run/certs/` 仍适用于源码树模式。
 
 ## 生成与推送
 

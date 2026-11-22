@@ -99,7 +99,7 @@ TWIN_AUTH=0 sh scripts/start.sh
 
 ## 证书信任（信任一次即可）
 
-`scripts/gen-certs.sh` 会生成**本地 CA + 服务器证书链**，SAN 自动包含 `localhost`、`127.0.0.1` 以及生成时在机器上检测到的所有 IPv4 地址。客户端只需要导入一张 `run/certs/ca.crt`，之后连接 TLS 端口不再需要 `--insecure`。
+`scripts/gen-certs.sh` 会生成**本地 CA + 服务器证书链**，源码树模式下在 `run/certs/`，安装为单命令后改在 `~/.local/share/twingate/certs/`；SAN 自动包含 `localhost`、`127.0.0.1` 以及生成时在机器上检测到的所有 IPv4 地址。客户端只需要导入一张 `ca.crt`，之后连接 TLS 端口不再需要 `--insecure`。
 
 ```sh
 sh scripts/gen-certs.sh                  # 生成/更新，CA 会复用
@@ -124,12 +124,61 @@ Android/ReDroid 需在设置里手工安装 CA；跨平台步骤与排错见 **[
 - `scripts/install-ca.sh` — 把 `ca.crt` 安装进当前系统信任库
 - `scripts/render-config.sh` — 由模板生成 `run/3proxy.cfg`（含认证开关）
 - `scripts/start.sh` / `stop.sh` / `status.sh` — 进程管理
+- `scripts/paths.sh` — 区分程序目录、配置目录与数据目录
+- `scripts/tg-runtime.sh` — 运行逻辑函数库（安装时内嵌到 `twingate`）
+- `scripts/install.sh` / `uninstall.sh` — 安装/卸载为 `twingate` 命令
 - `scripts/probe-env.sh` — 容器内环境探测（回传用）
 - `tgmenu.sh` — 纯 sh 文本控制台
 - `config/tui.env` — 控制台保存的配置与凭据（首次运行自动生成，不入库）
 - `tests/tg_probe.py` — 需要目标站可达的协议探测
 - `tests/tg_local_test.py` — 不依赖外网的本地自测
 - `CERTS.md` — 证书说明
+
+## 安装为单个命令（推荐）
+
+不想每次敲一堆 `sh scripts/xxx.sh`，可以安装成一条 `twingate` 命令。安装后 `<prefix>/bin/twingate` 是**唯一的可执行脚本**（TUI + 运行逻辑全部内嵌），`<prefix>/lib/twingate/` 里**只有 `3proxy`、`ttp`、`tgmux` 三个二进制**，不会复制脚本树、配置模板或测试文件。
+
+目录布局（默认用户级安装）：
+
+| 用途 | 路径 |
+| --- | --- |
+| 命令 | `~/.local/bin/twingate` |
+| 程序（仅二进制） | `~/.local/lib/twingate/` |
+| 配置（`tui.env`、`3proxy.cfg`） | `~/.local/config/twingate/` |
+| 数据（证书、日志、PID） | `~/.local/share/twingate/` |
+
+```sh
+# 用户级安装（默认，无需 root）
+make install
+# 系统级安装（需要写权限）
+make install PREFIX=/usr/local
+# Termux 安装到 $PREFIX
+make install PREFIX=/data/data/com.termux/files/usr
+# 自定义配置 / 数据目录
+make install CONFIG_DIR=/path/to/config DATA_DIR=/path/to/data
+# 或用脚本
+sh scripts/install.sh --user
+sh scripts/install.sh --system
+sh scripts/install.sh --termux
+```
+
+安装后：
+
+```sh
+twingate              # 无参数：文本菜单
+twingate start        # 启动
+twingate status       # 状态
+twingate config       # 查看当前配置
+twingate certs        # 生成 CA + 服务器证书（写入 ~/.local/share/twingate/certs）
+twingate trust        # 把 ca.crt 导入本机信任库
+twingate help         # 查看全部子命令
+```
+
+完整子命令：`start` / `stop` / `restart` / `status` / `config` / `build` / `certs` / `trust` / `probe` / `selftest` / `install` / `uninstall` / `help` / `version`。其中 `build`、`probe`、`selftest`、`install`、`uninstall` 需要在源码树运行（`twingate` 会给出提示），因为安装形态只携带二进制。环境变量覆盖照常生效，例如 `TWIN_AUTH=0 twingate start`。
+
+卸载保留配置与数据：`make uninstall`；连配置和数据一起删：`sh scripts/uninstall.sh --purge`。
+
+> Android/ReDroid 容器里安装后，仍**必须以 root 运行** `twingate start`（`adb shell` 后 `su`，或 Termux 里 ），原因见下文。
 
 ## 文本控制台（推荐）
 
@@ -142,7 +191,7 @@ id -u              # 容器内必须是 0
 sh tgmenu.sh
 ```
 
-> **仅限 Android/ReDroid 容器：非 root 下会“假成功”。** 用户实测：Termux 里 `su` 后启动主机可以连；`exit` 回普通用户再启动，`status.sh` 仍显示 `OK` / `LISTEN`，但主机连不上。这是 Android 按 UID 限制应用套接字入站连接导致的。容器内遇到“状态正常但主机不通”时，**先检查 `id -u` 是否为 0**。宿主机普通 Linux 没有这个限制。
+> **仅限 Android/ReDroid 容器：非 root 下会“假成功”。** 用户实测：Termux 里 `sudo` 启动主机可以连；回普通用户再启动，`status.sh` 仍显示 `OK` / `LISTEN`，但主机连不上。这是 Android 按 UID 限制应用套接字入站连接导致的。容器内遇到“状态正常但主机不通”时，**先检查 `id -u` 是否为 0**。宿主机普通 Linux 没有这个限制。
 
 纯 POSIX sh，只依赖 mksh/toybox。菜单包含：启动/停止/重启/状态；服务开关、8 个端口、绑定地址、认证设置、探测设置；重新构建；证书生成；需要外网的探测；**不依赖外网的本地自测**；证书信任说明。
 
@@ -197,6 +246,5 @@ Makefile 里 `make test` 仍是依赖外部目标站的全量探测。
 ## 许可证与致谢
 
 - 本项目自身代码（分发器、脚本、控制台、测试）使用 **LGPL-2.1-or-later**，见 `LICENSE`（包含 LGPLv2.1 与 GPLv2 官方全文）。
-- 上游组件各有自己的许可证：3proxy（BSD 风格自由软件）、ttp（Unlicense）、BearSSL（MIT）。详见 `THIRD_PARTY_NOTICES.md`。
 - 本项目未修改上游源码，所有 bionic / Termux 适配都在构建脚本和配置中完成。
 - English documentation: [README.en.md](README.en.md).

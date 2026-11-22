@@ -4,7 +4,9 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-CERTDIR=${TWIN_CERT_DIR:-$ROOT/run/certs}
+. "$ROOT/scripts/paths.sh"
+twin_init_paths "$0"
+CERTDIR=${TWIN_CERT_DIR:-$TWIN_DATA/run/certs}
 CA=${1:-$CERTDIR/ca.crt}
 NAME=twingate-local-ca
 

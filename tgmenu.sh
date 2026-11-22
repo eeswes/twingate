@@ -1,7 +1,8 @@
 #!/bin/sh
 # TwinGate text console (TUI)
 #
-# Target: ReDroid container via adb shell + su (mksh / toybox). No make, bash,
+# Target: POSIX sh on Linux hosts and ReDroid containers (mksh / toybox).
+# No make, bash,
 # whiptail, dialog or Python required. Python is only needed for the full probe.
 #
 # Usage:
@@ -15,9 +16,19 @@
 # every choice is equivalent to `TWIN_XXX=... sh scripts/start.sh`.
 set -u
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-CFG="$ROOT/config/tui.env"
-RUNDIR="$ROOT/run"
+_TG_SELF=$0
+_TG_HERE=$(CDPATH= cd -- "$(dirname -- "$_TG_SELF")" && pwd)
+# 安装模式下路径层与 runtime 已内嵌到本文件；源码树模式下从 scripts/ 加载。
+if ! command -v twin_init_paths >/dev/null 2>&1; then
+    . "$_TG_HERE/scripts/paths.sh"
+fi
+twin_init_paths "$_TG_SELF"
+ROOT=$TWIN_ROOT
+CFG="$TWIN_TUI_ENV"
+RUNDIR="$TWIN_RUN_DIR"
+if ! command -v twin_start >/dev/null 2>&1; then
+    . "$ROOT/scripts/tg-runtime.sh"
+fi
 
 MANAGED="TWIN_SERVICES TWIN_PLAIN_BIND \
 TWIN_HTTP_TLS TWIN_HTTP_PLAIN \
@@ -176,8 +187,27 @@ msg_zh() {
         m8) printf '生成 / 更新证书' ;;
         m9) printf '本地自测（不依赖外网，需 python3）' ;;
         m10) printf '证书信任说明' ;;
+        m11) printf '安装为 twingate 命令' ;;
+        m12) printf '卸载 twingate 命令' ;;
         m0) printf '退出' ;;
         ask.select) printf '请选择' ;;
+        cli.usage) printf '用法: twingate [子命令]（无参数进入菜单）' ;;
+        cli.cmds) printf '子命令: start stop restart status config build certs probe selftest trust install uninstall help' ;;
+        cli.unknown) printf '未知子命令:' ;;
+        installed.only) printf '该功能仅源码树模式可用，请在项目目录运行 tgmenu.sh。' ;;
+        cli.help) printf 'TwinGate 单命令入口。无参数启动文本菜单；配置与数据分别保存在用户配置目录和数据目录。' ;;
+        install.title) printf '安装为单个 twingate 命令' ;;
+        install.user) printf '用户目录 ~/.local（无需 root，推荐）' ;;
+        install.system) printf '系统目录 /usr/local（需要写权限）' ;;
+        install.termux) printf 'Termux 目录 $PREFIX' ;;
+        install.custom) printf '自定义前缀' ;;
+        install.ask.prefix) printf '安装前缀' ;;
+        install.confirm) printf '确认安装？会复制程序文件并生成启动器' ;;
+        install.done) printf '安装完成。试着运行: twingate status' ;;
+        install.nobins) printf '缺少 dist/3proxy 或 dist/ttp，请先在菜单 6) 重新构建' ;;
+        uninstall.title) printf '卸载 twingate 命令' ;;
+        uninstall.confirm) printf '确认卸载？用户数据（配置/证书/日志）会保留' ;;
+        uninstall.done) printf '卸载完成。' ;;
     esac
 }
 
@@ -306,8 +336,27 @@ msg_en() {
         m8) printf 'Generate / update certificate' ;;
         m9) printf 'Local self-test (offline, requires python3)' ;;
         m10) printf 'Certificate trust help' ;;
+        m11) printf 'Install as twingate command' ;;
+        m12) printf 'Uninstall twingate command' ;;
         m0) printf 'Exit' ;;
         ask.select) printf 'Your choice' ;;
+        cli.usage) printf 'Usage: twingate [command] (no arguments opens the menu)' ;;
+        cli.cmds) printf 'Commands: start stop restart status config build certs probe selftest trust install uninstall help' ;;
+        cli.unknown) printf 'Unknown command:' ;;
+        installed.only) printf 'Available only from the source tree; run tgmenu.sh in the project directory.' ;;
+        cli.help) printf 'TwinGate single command. Run without arguments for the menu; config and data live in separate user directories.' ;;
+        install.title) printf 'Install twingate as a single command' ;;
+        install.user) printf 'User directory ~/.local (no root, recommended)' ;;
+        install.system) printf 'System directory /usr/local (needs write access)' ;;
+        install.termux) printf 'Termux directory $PREFIX' ;;
+        install.custom) printf 'Custom prefix' ;;
+        install.ask.prefix) printf 'Install prefix' ;;
+        install.confirm) printf 'Install now? Program files and a launcher will be created' ;;
+        install.done) printf 'Installed. Try: twingate status' ;;
+        install.nobins) printf 'dist/3proxy or dist/ttp missing; rebuild first via menu 6)' ;;
+        uninstall.title) printf 'Uninstall twingate command' ;;
+        uninstall.confirm) printf 'Uninstall now? User data (config/certs/logs) is kept' ;;
+        uninstall.done) printf 'Uninstalled.' ;;
     esac
 }
 
@@ -379,9 +428,8 @@ export_config() {
 }
 
 load_config() {
-    . "$ROOT/config/ports.env"
-    . "$ROOT/scripts/load-tui-env.sh"
-    load_tui_env "$CFG"
+    twin_ports_init
+    twin_load_tui_env "$CFG"
     if [ -z "${TWIN_SERVICES:-}" ]; then
         TWIN_SERVICES="http-tls,http-plain,socks-tls,socks-plain,ftp-tls,ftp-plain"
     fi
@@ -449,13 +497,13 @@ svc_toggle() {
 
 do_start() {
     printf '\n[start] %s: %s\n' "$(T act.start)" "$TWIN_SERVICES"
-    sh "$ROOT/scripts/start.sh"
+    twin_start
     printf '[start] %s: %s\n' "$(T act.exit)" "$?"
 }
 
 do_stop() {
     printf '\n[stop] %s\n' "$(T act.stop)"
-    sh "$ROOT/scripts/stop.sh"
+    twin_stop
     printf '[stop] %s: %s\n' "$(T act.exit)" "$?"
 }
 
@@ -467,10 +515,14 @@ do_restart() {
 
 do_status() {
     printf '\n[status] %s\n' "$(T act.status)"
-    sh "$ROOT/scripts/status.sh"
+    twin_status
 }
 
 do_build() {
+    if [ "${TWIN_INSTALLED:-0}" = 1 ]; then
+        printf '[build] %s\n' "$(T installed.only)"
+        return 1
+    fi
     printf '\n[build] %s\n' "$(T build.note1)"
     printf '[build] %s\n' "$(T build.note2)"
     if confirm "$(T build.confirm)"; then
@@ -500,11 +552,57 @@ do_certs() {
     fi
     if [ -n "$_cert_ips" ] || [ -n "$_cert_dns" ]; then
         printf '[cert] %s IP=[%s] DNS=[%s]\n' "$(T cert.san)" "$_cert_ips" "$_cert_dns"
-        TWIN_CERT_IPS="$_cert_ips" TWIN_CERT_DNS="$_cert_dns" sh "$ROOT/scripts/gen-certs.sh"
+        TWIN_CERT_IPS="$_cert_ips" TWIN_CERT_DNS="$_cert_dns" twin_gen_certs
     else
-        sh "$ROOT/scripts/gen-certs.sh"
+        twin_gen_certs
     fi
     printf '[cert] %s: %s\n' "$(T act.exit)" "$?"
+}
+
+do_install() {
+    if [ "${TWIN_INSTALLED:-0}" = 1 ]; then
+        printf '[install] %s\n' "$(T installed.only)"
+        return 1
+    fi
+    printf '\n[install] %s\n' "$(T install.title)"
+    if [ ! -f "$ROOT/dist/3proxy" ] || [ ! -f "$ROOT/dist/ttp" ]; then
+        printf '[install] %s\n' "$(T install.nobins)"
+        return 1
+    fi
+    printf ' 1) %s\n' "$(T install.user)"
+    printf ' 2) %s\n' "$(T install.system)"
+    printf ' 3) %s\n' "$(T install.termux)"
+    printf ' 4) %s\n' "$(T install.custom)"
+    printf '\n%s: ' "$(T ask.select)"
+    read -r c || return 1
+    case "$c" in
+        1) set -- --user ;;
+        2) set -- --system ;;
+        3) set -- --termux ;;
+        4)
+            ask_value "$(T install.ask.prefix)" || { pause; return 1; }
+            set -- --prefix "$VAL"
+            ;;
+        *) printf '%s\n' "$(T err.invalid)"; return 1 ;;
+    esac
+    confirm "$(T install.confirm)" || { printf '[install] %s\n' "$(T build.cancelled)"; return 1; }
+    sh "$ROOT/scripts/install.sh" "$@"
+    rc=$?
+    [ "$rc" -eq 0 ] && printf '[install] %s\n' "$(T install.done)"
+    return "$rc"
+}
+
+do_uninstall() {
+    if [ "${TWIN_INSTALLED:-0}" = 1 ]; then
+        printf '[uninstall] %s\n' "$(T installed.only)"
+        return 1
+    fi
+    printf '\n[uninstall] %s\n' "$(T uninstall.title)"
+    confirm "$(T uninstall.confirm)" || { printf '[uninstall] %s\n' "$(T build.cancelled)"; return 1; }
+    sh "$ROOT/scripts/uninstall.sh"
+    rc=$?
+    [ "$rc" -eq 0 ] && printf '[uninstall] %s\n' "$(T uninstall.done)"
+    return "$rc"
 }
 
 find_python() {
@@ -591,6 +689,10 @@ probe_one() {
 
 do_probe() {
     printf '\n[probe] %s\n' "$(T probe.title)"
+    if [ "${TWIN_INSTALLED:-0}" = 1 ]; then
+        printf '[probe] %s\n' "$(T installed.only)"
+        return 1
+    fi
     py=$(find_python) || {
         printf '[probe] %s\n' "$(T probe.no.python)"
         printf '[probe] %s\n' "$(T probe.tips.termux)"
@@ -626,6 +728,10 @@ do_probe() {
 
 do_local_test() {
     printf '\n[selftest] %s\n' "$(T selftest.title)"
+    if [ "${TWIN_INSTALLED:-0}" = 1 ]; then
+        printf '[selftest] %s\n' "$(T installed.only)"
+        return 1
+    fi
     py=$(find_python) || {
         printf '[selftest] %s\n' "$(T selftest.no.python)"
         return 1
@@ -642,11 +748,15 @@ do_cert_help() {
     printf ' 1) %s\n' "$(T certhelp.gen)"
     printf '    %s\n' "$(T certhelp.gen1)"
     printf '    %s\n' "$(T certhelp.gen2)"
-    printf ' 2) %s %s\n' "$(T certhelp.dist)" "$ROOT/run/certs/ca.crt"
+    printf ' 2) %s %s\n' "$(T certhelp.dist)" "$TWIN_CERT_DIR/ca.crt"
     printf ' 3) %s\n' "$(T certhelp.trust)"
     printf '    %s\n' "$(T certhelp.android)"
     printf ' 4) %s\n\n' "$(T certhelp.verify)"
-    printf ' %s %s/CERTS.md\n\n' "$(T certhelp.full)" "$ROOT"
+    if [ "${TWIN_INSTALLED:-0}" = 1 ]; then
+        printf ' %s CERTS.md (see source tree)\n\n' "$(T certhelp.full)"
+    else
+        printf ' %s %s/CERTS.md\n\n' "$(T certhelp.full)" "$ROOT"
+    fi
     pause
 }
 
@@ -852,7 +962,7 @@ menu_config() {
 draw_main() {
     clear_screen
     printf '==================================================\n'
-    printf '  TwinGate %s   (adb shell + su)\n' "$(T main.title)"
+    printf '  TwinGate %s\n' "$(T main.title)"
     printf '==================================================\n'
     printf ' %s: %s\n' "$(T main.services)" "$TWIN_SERVICES"
     printf ' %s: %s\n' "$(T main.bind)" "$TWIN_PLAIN_BIND"
@@ -878,13 +988,53 @@ draw_main() {
     printf '  8) %s\n' "$(T m8)"
     printf '  9) %s\n' "$(T m9)"
     printf ' 10) %s\n' "$(T m10)"
+    printf ' 11) %s\n' "$(T m11)"
+    printf ' 12) %s\n' "$(T m12)"
     printf '\n  0) %s\n' "$(T m0)"
     printf '%s\n' '--------------------------------------------------'
+}
+
+# 非交互子命令：twingate <cmd>，无参数时进入菜单。
+run_cli() {
+    cmd=$1
+    shift
+    case "$cmd" in
+        start)          do_start ;;
+        stop)           do_stop ;;
+        restart)        do_restart ;;
+        status)         do_status ;;
+        config)         show_config ;;
+        build)          do_build ;;
+        certs|cert)     twin_gen_certs ;;
+        trust)          twin_install_ca "$@" ;;
+        probe)          do_probe ;;
+        selftest)       do_local_test ;;
+        install)        sh "$ROOT/scripts/install.sh" "$@" ;;
+        uninstall)      sh "$ROOT/scripts/uninstall.sh" "$@" ;;
+        menu)           return 0 ;;
+        help|-h|--help)
+            printf '%s\n' "$(T cli.usage)"
+            printf '%s\n' "$(T cli.cmds)"
+            printf '%s\n' "$(T cli.help)"
+            ;;
+        version|-V|--version) printf 'TwinGate (LGPL-2.1-or-later)\n' ;;
+        *) printf '%s %s\n' "$(T cli.unknown)" "$cmd" >&2
+           printf '%s\n' "$(T cli.cmds)" >&2
+           return 1 ;;
+    esac
 }
 
 main() {
     cd "$ROOT" || exit 1
     load_config
+
+    if [ "$#" -gt 0 ]; then
+        case "$1" in
+            menu) shift; [ "$#" -eq 0 ] || { printf '%s %s\n' "$(T cli.unknown)" "$*" >&2; exit 1; } ;;
+            *) run_cli "$@"; exit $? ;;
+        esac
+    fi
+
     if [ ! -f "$CFG" ]; then
         save_config
         printf '%s%s\n' "$(T created.cfg)" "$CFG"
@@ -905,6 +1055,8 @@ main() {
             8) do_certs;    pause ;;
             9) do_local_test;  pause ;;
             10) do_cert_help ;;
+            11) do_install; pause ;;
+            12) do_uninstall; pause ;;
             0) printf '%s\n' "$(T bye)"; exit 0 ;;
             *) printf '%s\n' "$(T err.invalid)"; pause ;;
         esac

@@ -5,26 +5,32 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$ROOT/scripts/paths.sh"
+twin_init_paths "$0"
 # 记录是否由用户显式指定各协议绑定地址（要在 sourcing ports.env 之前）。
 _explicit_http_bind=${TWIN_HTTP_BIND+x}
 _explicit_socks_bind=${TWIN_SOCKS_BIND+x}
 _explicit_ftp_bind=${TWIN_FTP_BIND+x}
 . "$ROOT/config/ports.env"
-RUNDIR=${TWIN_RUN_DIR:-$ROOT/run}
+RUNDIR=${TWIN_RUN_DIR:-$TWIN_DATA/run}
 # 直接调用本脚本时也读取 tgmenu.sh 保存的配置；显式环境变量优先。
 . "$ROOT/scripts/load-tui-env.sh"
-load_tui_env "$ROOT/config/tui.env"
+load_tui_env "$TWIN_TUI_ENV"
 # tui.env 里显式写出的绑定地址也算用户指定，不应被下面的回环保护覆盖。
 if tui_loaded TWIN_HTTP_BIND;  then _explicit_http_bind=x;  fi
 if tui_loaded TWIN_SOCKS_BIND; then _explicit_socks_bind=x; fi
 if tui_loaded TWIN_FTP_BIND;   then _explicit_ftp_bind=x;   fi
-CERTDIR=${TWIN_CERT_DIR:-$ROOT/run/certs}
+CERTDIR=${TWIN_CERT_DIR:-$TWIN_DATA/run/certs}
 mkdir -p "$RUNDIR" "$TWIN_LOG_DIR"
 
 if [ "${TWIN_AUTH:-0}" = 1 ] &&
    [ "${TWIN_AUTH_USER:-}" = twingate ] && [ "${TWIN_AUTH_PASS:-}" = twingate123 ]; then
     echo "[auth] 警告：正在使用默认凭据 twingate / twingate123。"
-    echo "[auth] 请用 tgmenu.sh 的「配置 -> 认证设置」修改，或设 TWIN_AUTH=0 关闭。"
+    if [ "${TWIN_INSTALLED:-0}" = 1 ]; then
+        echo "[auth] 请用 'twingate' 菜单的认证设置修改，或设 TWIN_AUTH=0 关闭。"
+    else
+        echo "[auth] 请用 tgmenu.sh 的「配置 -> 认证设置」修改，或设 TWIN_AUTH=0 关闭。"
+    fi
 fi
 
 # ---------------- 确定要开放哪些服务 ----------------
@@ -222,4 +228,4 @@ if has_service mixed-tls; then
     start_ttp ttp-mixed "$TWIN_MIXED_TLS" "$TWIN_MUX_PLAIN"
 fi
 
-echo "[start] 完成。运行 scripts/status.sh 查看状态。"
+echo "[start] 完成。运行 'twingate status' 或 scripts/status.sh 查看状态。"

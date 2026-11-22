@@ -120,9 +120,10 @@ Notes:
 
 ## Certificate trust (import once)
 
-`scripts/gen-certs.sh` creates a **local CA plus a server certificate chain**. The SAN
-automatically includes `localhost`, `127.0.0.1` and every IPv4 address detected on the
-machine at generation time. Clients only need to import one file, `run/certs/ca.crt`;
+`scripts/gen-certs.sh` creates a **local CA plus a server certificate chain**. It writes to
+`run/certs/` in the source tree and to `~/.local/share/twingate/certs/` after single-command
+installation. The SAN automatically includes `localhost`, `127.0.0.1` and every IPv4 address
+detected on the machine at generation time. Clients only need to import one file, `ca.crt`;
 afterwards TLS connections no longer need `--insecure`.
 
 ```sh
@@ -152,6 +153,9 @@ skips verification by default; enable it with `--verify` or TUI "Config -> Probe
 - `scripts/install-ca.sh` — install `ca.crt` into the current system trust store
 - `scripts/render-config.sh` — render `run/3proxy.cfg` from the template (incl. auth)
 - `scripts/start.sh` / `stop.sh` / `status.sh` — process management
+- `scripts/paths.sh` — separates program, config and data directories
+- `scripts/tg-runtime.sh` — runtime function library (embedded into `twingate` at install time)
+- `scripts/install.sh` / `uninstall.sh` — install/uninstall the `twingate` command
 - `scripts/probe-env.sh` — in-container environment probe (for support reports)
 - `tgmenu.sh` — pure-sh text console, auto-detects Simplified Chinese or English
 - `config/tui.env` — console settings and credentials (created on first run, not committed)
@@ -159,11 +163,57 @@ skips verification by default; enable it with `--verify` or TUI "Config -> Probe
 - `tests/tg_local_test.py` — offline self-test with a built-in local origin
 - `CERTS.md` — certificate guide
 
+## Install as a single command (recommended)
+
+Instead of typing a bunch of `sh scripts/xxx.sh`, install TwinGate as one `twingate` command. After installation, `<prefix>/bin/twingate` is the **only executable script** (TUI and runtime logic are embedded), and `<prefix>/lib/twingate/` contains **only the three binaries** `3proxy`, `ttp` and `tgmux` — no script tree, config templates or tests are copied.
+
+Layout (default user-level install):
+
+| Purpose | Path |
+| --- | --- |
+| Command | `~/.local/bin/twingate` |
+| Programs (binaries only) | `~/.local/lib/twingate/` |
+| Config (`tui.env`, `3proxy.cfg`) | `~/.local/config/twingate/` |
+| Data (certs, logs, PID files) | `~/.local/share/twingate/` |
+
+```sh
+# user-level install (default, no root needed)
+make install
+# system-wide (needs write access)
+make install PREFIX=/usr/local
+# Termux: install into $PREFIX
+make install PREFIX=/data/data/com.termux/files/usr
+# custom config / data directories
+make install CONFIG_DIR=/path/to/config DATA_DIR=/path/to/data
+# or call the script directly
+sh scripts/install.sh --user
+sh scripts/install.sh --system
+sh scripts/install.sh --termux
+```
+
+After installation:
+
+```sh
+twingate              # no arguments: text menu
+twingate start        # start
+twingate status       # status
+twingate config       # show current configuration
+twingate certs        # generate CA + server certificate (into ~/.local/share/twingate/certs)
+twingate trust        # import ca.crt into the local trust store
+twingate help         # list all subcommands
+```
+
+Full list: `start` / `stop` / `restart` / `status` / `config` / `build` / `certs` / `trust` / `probe` / `selftest` / `install` / `uninstall` / `help` / `version`. `build`, `probe`, `selftest`, `install` and `uninstall` require the source tree (`twingate` will tell you so), since the installed form carries binaries only. Environment overrides still work, e.g. `TWIN_AUTH=0 twingate start`.
+
+Uninstall keeps config and data: `make uninstall`; to remove them too: `sh scripts/uninstall.sh --purge`.
+
+> Inside an Android/ReDroid container, `twingate start` must still **run as root** (`adb shell` then `su` in Termux) — see below.
+
 ## Text console (recommended)
 
 No need to memorize `sh scripts/xxx.sh`, or to use `make`. A normal user is fine on
 a Linux host; inside a ReDroid container, **the proxy must be started as root** (`adb shell` then
-`su`, or `su` in Termux):
+`su` in Termux):
 
 ```sh
 cd /path/to/this/repo
@@ -173,7 +223,7 @@ sh tgmenu.sh
 ```
 
 > **Android/ReDroid containers only: non-root gives a false success.** Reported behavior:
-> starting after `su` in Termux works from the host; after `exit` back to a normal
+> starting with `sudo` in Termux works from the host; after back to a normal
 > user and starting again, `status.sh` still shows `OK` / `LISTEN` but the host cannot
 > connect. Android restricts inbound sockets per UID. When "status looks fine but the
 > host cannot connect" happens inside a container, **check `id -u` is 0 first**.
@@ -244,7 +294,5 @@ python3 tests/tg_local_test.py
 
 - TwinGate's own code (dispatcher, scripts, console, tests) is licensed under
   **LGPL-2.1-or-later**; see `LICENSE`, which includes the official LGPLv2.1 and GPLv2 texts.
-- Upstream components keep their own licenses: 3proxy (BSD-style free software),
-  ttp (Unlicense), BearSSL (MIT). See `THIRD_PARTY_NOTICES.md`.
 - No upstream source code was modified; all bionic / Termux adaptations live in the
   build scripts and configuration.

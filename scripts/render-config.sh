@@ -3,12 +3,14 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$ROOT/scripts/paths.sh"
+twin_init_paths "$0"
 . "$ROOT/config/ports.env"
 # tgmenu.sh 保存的配置也参与渲染；与 start.sh 共用加载器，保证环境变量优先的规则一致。
 . "$ROOT/scripts/load-tui-env.sh"
-load_tui_env "$ROOT/config/tui.env"
+load_tui_env "$TWIN_TUI_ENV"
 
-OUT="${1:-${TWIN_CONFIG_PATH:-$ROOT/run/3proxy.cfg}}"
+OUT="${1:-${TWIN_CONFIG_PATH:-$TWIN_DATA/run/3proxy.cfg}}"
 mkdir -p "$(dirname "$OUT")" "$TWIN_LOG_DIR"
 
 cp "$ROOT/config/3proxy.cfg.tpl" "$OUT"

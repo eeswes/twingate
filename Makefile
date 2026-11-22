@@ -1,4 +1,14 @@
-.PHONY: vendor build certs trust-cert start stop status test selftest clean
+.PHONY: vendor build certs trust-cert start stop status test selftest install uninstall clean
+
+# 安装为单个 twingate 命令。默认装到 ~/.local；可指定 PREFIX / CONFIG_DIR / DATA_DIR。
+# 例：make install PREFIX=/usr/local
+#     make install PREFIX=/data/data/com.termux/files/usr
+#     make uninstall PREFIX=/usr/local
+install:
+	sh scripts/install.sh $(if $(PREFIX),--prefix $(PREFIX)) $(if $(CONFIG_DIR),--config-dir $(CONFIG_DIR)) $(if $(DATA_DIR),--data-dir $(DATA_DIR))
+
+uninstall:
+	sh scripts/uninstall.sh $(if $(PREFIX),--prefix $(PREFIX)) $(if $(CONFIG_DIR),--config-dir $(CONFIG_DIR)) $(if $(DATA_DIR),--data-dir $(DATA_DIR))
 
 vendor:
 	sh scripts/fetch-vendor.sh

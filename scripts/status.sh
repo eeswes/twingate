@@ -2,7 +2,9 @@
 # 查看 TwinGate 进程与监听端口（兼容 toybox/busybox/netstat/ss）。
 set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-RUNDIR=${TWIN_RUN_DIR:-$ROOT/run}
+. "$ROOT/scripts/paths.sh"
+twin_init_paths "$0"
+RUNDIR=${TWIN_RUN_DIR:-$TWIN_DATA/run}
 if [ -f "$ROOT/config/ports.env" ]; then
     . "$ROOT/config/ports.env"
 fi
@@ -48,7 +50,7 @@ else
 fi
 
 echo "=== LOG TAIL ==="
-for f in "$ROOT"/logs/*.out; do
+for f in "$TWIN_LOG_DIR"/*.out; do
     [ -f "$f" ] || continue
     echo "--- $(basename "$f")"
     tail -n 10 "$f" 2>/dev/null || true

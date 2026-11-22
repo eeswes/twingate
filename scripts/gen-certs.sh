@@ -10,7 +10,9 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-CERTDIR=${TWIN_CERT_DIR:-$ROOT/run/certs}
+. "$ROOT/scripts/paths.sh"
+twin_init_paths "$0"
+CERTDIR=${TWIN_CERT_DIR:-$TWIN_DATA/run/certs}
 DAYS=${TWIN_CERT_DAYS:-365}
 CA_DAYS=${TWIN_CERT_CA_DAYS:-3650}
 CN=${TWIN_CERT_CN:-TwinGate}
