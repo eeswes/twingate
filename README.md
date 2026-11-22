@@ -2,6 +2,8 @@
 
 本地代理网关：**3proxy 做协议核心，ttp 做 TLS 前端**。支持 HTTP、SOCKS4/5、FTP 代理，并为每个协议提供 TLS 加密入口；默认开启用户名/密码认证，方便直接给局域网设备使用。可在普通 Linux 主机上运行，也可用于 x86_64 ReDroid 容器（容器内需以 root 运行代理）。
 
+英文文档见 [README.en.md](README.en.md)。
+
 ## 架构
 
 ```
@@ -143,7 +145,7 @@ sh tgmenu.sh
 
 纯 POSIX sh，只依赖 mksh/toybox。菜单包含：启动/停止/重启/状态；服务开关、8 个端口、绑定地址、认证设置、探测设置；重新构建；证书生成；需要外网的探测；**不依赖外网的本地自测**；证书信任说明。
 
-控制台会按系统 locale 自动选择**简体中文或英文**（只支持这两种）；可用 `TWIN_UI_LANG=zh` 或 `TWIN_UI_LANG=en` 覆盖，也可在「配置 → 9) 界面语言」里切换并保存到 `config/tui.env`。英文文档见 [README.en.md](README.en.md)。
+控制台会按系统 locale 自动选择**简体中文或英文**（只支持这两种）；可用 `TWIN_UI_LANG=zh` 或 `TWIN_UI_LANG=en` 覆盖，也可在「配置 → 9) 界面语言」里切换并保存到 `config/tui.env`。
 
 ## 快速开始
 
