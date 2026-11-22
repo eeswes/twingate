@@ -27,6 +27,7 @@
 | HTTP / CONNECT | 18080 | 31808 |
 | SOCKS4/5 | 11080 | 31080 |
 | FTP proxy | 10021 | 30021 |
+| 混合 | 17890 | 37890 |
 
 ## 单端口混合模式（可选）
 
@@ -128,20 +129,20 @@ Android/ReDroid 需在设置里手工安装 CA；跨平台步骤与排错见 **[
 - `config/tui.env` — 控制台保存的配置与凭据（首次运行自动生成，不入库）
 - `tests/tg_probe.py` — 需要目标站可达的协议探测
 - `tests/tg_local_test.py` — 不依赖外网的本地自测
-- `CERTS.md` / `TEST-PLAN.md` — 证书说明 / 容器测试清单
+- `CERTS.md` — 证书说明
 
 ## 文本控制台（推荐）
 
-不用记 `sh scripts/xxx.sh`，也不需要 `make`。Linux 主机上普通用户即可运行；在 ReDroid 容器里运行控制台时，**必须以 root 身份启动代理**（`adb shell` 后 `su`，或 Termux 里先 `sudo bash`）：
+不用记 `sh scripts/xxx.sh`，也不需要 `make`。Linux 主机上普通用户即可运行；在 ReDroid 容器里运行控制台时，**必须以 root 身份启动代理**（`adb shell` 后 `su`，或 Termux 里先 `su`）：
 
 ```sh
-cd /sdcard/Download/twingate
-sudo bash          # 或：adb shell 后执行 su
+cd /path/to/this/repo
+su                 # 或：adb shell 后执行 su
 id -u              # 容器内必须是 0
 sh tgmenu.sh
 ```
 
-> **仅限 Android/ReDroid 容器：非 root 下会“假成功”。** 用户实测：Termux 里 `sudo bash` 后启动主机可以连；`exit` 回普通用户再启动，`status.sh` 仍显示 `OK` / `LISTEN`，但主机连不上。这是 Android 按 UID 限制应用套接字入站连接导致的。容器内遇到“状态正常但主机不通”时，**先检查 `id -u` 是否为 0**。宿主机普通 Linux 没有这个限制。
+> **仅限 Android/ReDroid 容器：非 root 下会“假成功”。** 用户实测：Termux 里 `su` 后启动主机可以连；`exit` 回普通用户再启动，`status.sh` 仍显示 `OK` / `LISTEN`，但主机连不上。这是 Android 按 UID 限制应用套接字入站连接导致的。容器内遇到“状态正常但主机不通”时，**先检查 `id -u` 是否为 0**。宿主机普通 Linux 没有这个限制。
 
 纯 POSIX sh，只依赖 mksh/toybox。菜单包含：启动/停止/重启/状态；服务开关、8 个端口、绑定地址、认证设置、探测设置；重新构建；证书生成；需要外网的探测；**不依赖外网的本地自测**；证书信任说明。
 

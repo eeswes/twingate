@@ -36,6 +36,7 @@ client --plain--> 3proxy <TWIN_PLAIN_BIND>:<plain port> ------------------------
 | HTTP / CONNECT | 18080 | 31808 |
 | SOCKS4/5 | 11080 | 31080 |
 | FTP proxy | 10021 | 30021 |
+| Mixed | 17890 | 37890 |
 
 ## Single-port mixed mode (optional)
 
@@ -156,23 +157,23 @@ skips verification by default; enable it with `--verify` or TUI "Config -> Probe
 - `config/tui.env` — console settings and credentials (created on first run, not committed)
 - `tests/tg_probe.py` — protocol probes that need a reachable target
 - `tests/tg_local_test.py` — offline self-test with a built-in local origin
-- `CERTS.md` / `TEST-PLAN.md` — certificate guide / container test checklist
+- `CERTS.md` — certificate guide
 
 ## Text console (recommended)
 
 No need to memorize `sh scripts/xxx.sh`, or to use `make`. A normal user is fine on
 a Linux host; inside a ReDroid container, **the proxy must be started as root** (`adb shell` then
-`su`, or `sudo bash` in Termux):
+`su`, or `su` in Termux):
 
 ```sh
-cd /sdcard/Download/twingate
-sudo bash          # or: adb shell, then su
+cd /path/to/this/repo
+su                 # or: adb shell, then su
 id -u              # must be 0 inside the container
 sh tgmenu.sh
 ```
 
 > **Android/ReDroid containers only: non-root gives a false success.** Reported behavior:
-> starting after `sudo bash` in Termux works from the host; after `exit` back to a normal
+> starting after `su` in Termux works from the host; after `exit` back to a normal
 > user and starting again, `status.sh` still shows `OK` / `LISTEN` but the host cannot
 > connect. Android restricts inbound sockets per UID. When "status looks fine but the
 > host cannot connect" happens inside a container, **check `id -u` is 0 first**.
