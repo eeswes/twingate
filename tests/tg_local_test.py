@@ -370,6 +370,8 @@ def clean_env(root, tmp, cert_dir, run_dir, log_dir, runtime_dir):
         if k.startswith("TWIN_") or k.startswith("TG_"):
             del env[k]
     env.update({
+        # 隔离开发者本机的 config/tui.env（否则里面的 TWIN_PARENT/TWIN_AUTH 会渗进用例）。
+        "TWIN_TUI_ENV": os.path.join(tmp, "no-such-tui.env"),
         "TWIN_CERT_DIR": cert_dir,
         "TWIN_RUN_DIR": run_dir,
         "TWIN_LOG_DIR": log_dir,
@@ -392,6 +394,7 @@ def test_parent_config(res, root, tmp):
             if k.startswith("TWIN_") or k.startswith("TG_"):
                 del env[k]
         env.update({"TWIN_CONFIG_PATH": out, "TWIN_LOG_DIR": os.path.join(tmp, "logs")})
+        env["TWIN_TUI_ENV"] = os.path.join(tmp, "no-such-tui.env")
         env.update(extra)
         rc = subprocess.run(["sh", os.path.join(root, "scripts/render-config.sh"), out],
                             cwd=root, env=env, stdout=subprocess.DEVNULL,
@@ -436,6 +439,108 @@ def test_parent_config(res, root, tmp):
               "parent 1000 socks5+ ::1 1080" in text, text[:80].replace("\n", " "))
 
 
+def _netns_sh(script, timeout=120):
+    """在独立网络命名空间里跑一段 sh（需要 root 与 unshare）。返回 (rc, 输出)。"""
+    p = subprocess.run(["unshare", "-n", "sh", "-c", script],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+    return p.returncode, p.stdout.decode("utf-8", "replace")
+
+
+def test_tun_config(res, root, tmp):
+    """tgtun 的探测/决策，以及 -De/-e 注入到 3proxy 服务行。"""
+    tgtun = os.path.join(root, "dist", "tgtun")
+    if not (os.path.isfile(tgtun) and os.access(tgtun, os.X_OK)):
+        res.check("tgtun 已随构建产出", False, "缺少 dist/tgtun，先执行 scripts/build.sh")
+        return
+
+    # ---- 不需要网卡的用例 ----
+    p = subprocess.run([tgtun, "plan", "--iface", "tg-no-such-dev"],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = p.stdout.decode("utf-8", "replace")
+    res.check("tgtun 指定不存在的网卡报错",
+              p.returncode == 1 and "reason=iface-not-found" in out,
+              out.strip().replace("\n", " ")[:120])
+
+    p = subprocess.run([tgtun, "plan", "--bind", "bogus"],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    res.check("tgtun 拒绝非法 --bind", p.returncode == 2, "")
+
+    rc, _ = _netns_sh("true")
+    if rc != 0:
+        res.check("tgtun 真实网卡用例（需要 root）", True, "skipped")
+        return
+
+    cfg_dir = os.path.join(tmp, "tun")
+    os.makedirs(cfg_dir, exist_ok=True)
+    script = """
+set -e
+ip link add tun9 type veth peer name eth9
+ip addr add 10.9.9.2/24 dev tun9
+ip link set lo up; ip link set tun9 up; ip link set eth9 up
+echo "== plan-nodefault"
+"{tgtun}" plan --iface tun9
+echo "== list"
+"{tgtun}" list
+echo "== check"
+"{tgtun}" check tun9 || true
+echo "== render-device"
+TWIN_TUN=tun9 TWIN_TUI_ENV=/nonexistent TWIN_LOG_DIR="{cfg}" TWIN_CONFIG_PATH="{cfg}/dev.cfg" \
+    sh "{root}/scripts/render-config.sh" "{cfg}/dev.cfg" >/dev/null
+grep -E '^(proxy|socks|ftppr) ' "{cfg}/dev.cfg"
+echo "== render-source"
+TWIN_TUN=tun9 TWIN_TUN_BIND=source TWIN_TUI_ENV=/nonexistent TWIN_LOG_DIR="{cfg}" \
+    TWIN_CONFIG_PATH="{cfg}/src.cfg" sh "{root}/scripts/render-config.sh" "{cfg}/src.cfg" >/dev/null
+grep -E '^(proxy|socks|ftppr) ' "{cfg}/src.cfg"
+echo "== render-direct"
+ip route add default via 10.9.9.1 dev tun9
+TWIN_TUN=tun9 TWIN_TUI_ENV=/nonexistent TWIN_LOG_DIR="{cfg}" TWIN_CONFIG_PATH="{cfg}/dir.cfg" \
+    sh "{root}/scripts/render-config.sh" "{cfg}/dir.cfg" >/dev/null
+grep -E '^(proxy|socks|ftppr) ' "{cfg}/dir.cfg"
+echo "== plan-default"
+"{tgtun}" plan --iface tun9
+""".format(tgtun=tgtun, root=root, cfg=cfg_dir)
+    rc, out = _netns_sh(script)
+
+    def section(name):
+        if "== " + name not in out:
+            return ""
+        body = out.split("== " + name, 1)[1]
+        for nxt in ("plan-nodefault", "list", "check", "render-device",
+                    "render-source", "render-direct", "plan-default"):
+            body = body.split("== " + nxt, 1)[0]
+        return body
+
+    plan_before = section("plan-nodefault")
+    res.check("tgtun 无默认路由时选择绑定网卡",
+              "status=ok" in plan_before and "mode=device" in plan_before and
+              "arg=-Detun9" in plan_before,
+              plan_before.strip().replace("\n", " ")[:160])
+
+    res.check("tgtun list 列出 tun9",
+              "tun9" in section("list") and "up" in section("list"))
+
+    res.check("tgtun check 报告权限结果",
+              section("check").strip().split("\n")[0] in ("allow", "deny", "error"),
+              section("check").strip()[:40])
+
+    dev = section("render-device")
+    res.check("配置注入 -De<dev> 到三条服务行",
+              dev.count("-Detun9") == 3, dev.strip().replace("\n", " | ")[:160])
+
+    src = section("render-source")
+    res.check("无权限时注入 -e<ip>",
+              src.count("-e10.9.9.2") == 3, src.strip().replace("\n", " | ")[:160])
+
+    direct = section("render-direct")
+    plan_after = section("plan-default")
+    res.check("TUN 承载默认路由时不注入任何参数",
+              "-Detun9" not in direct and "-e10.9.9.2" not in direct and
+              "proxy -p" in direct)
+    res.check("tgtun 识别默认路由为零配置",
+              "mode=direct" in plan_after and "carries_default=1" in plan_after,
+              plan_after.strip().replace("\n", " ")[:160])
+
+
 def test_tui_env(res, root, tmp):
     """tui.env（控制台保存的配置）必须生效，且显式环境变量优先于它。"""
     tui = os.path.join(tmp, "tui.env")
@@ -473,6 +578,43 @@ def test_tui_env(res, root, tmp):
     text = render("cfg-tui-bind.cfg", {"TWIN_TUI_ENV": os.path.join(tmp, "no-such.env"),
                                        "TWIN_PLAIN_BIND": "0.0.0.0"})
     res.check("关闭 tui.env 后端口仍按环境变量渲染", "proxy -p31808" in text)
+
+
+def test_tui_tun_menu(res, root, tmp):
+    """TUN 子菜单的输入约定：回车返回、直接敲网卡名也认、纯数字给提示。"""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("TWIN_", "TG_"))}
+    tui = os.path.join(tmp, "menu.env")
+    env.update({
+        "TWIN_TUI_ENV": tui,
+        "TWIN_LOG_DIR": os.path.join(tmp, "menu-logs"),
+        "TWIN_UI_LANG": "zh",
+    })
+
+    def run(payload):
+        p = subprocess.run(["sh", os.path.join(root, "tgmenu.sh")], cwd=root,
+                           input=payload.encode(), stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, env=env)
+        return p.stdout.decode("utf-8", "replace")
+
+    # 首次运行会创建配置文件并 pause 一次，先把这一步走掉。
+    run("\n0\n")
+
+    out = run("5\n11\n\n0\n0\n0\n")
+    res.check("TUN 子菜单直接回车 = 返回上级",
+              "=== 配置 ===" in out and "无效选择" not in out)
+
+    out = run("5\n11\n9\n\n0\n0\n0\n")
+    res.check("TUN 子菜单输纯数字给出提示", "TUN 菜单只有 1-4" in out)
+
+    out = run("5\n11\ntun0\n\n0\n0\n0\n")
+    res.check("TUN 子菜单直接输入网卡名生效", "网卡已设为 tun0" in out)
+    with open(tui, encoding="utf-8") as f:
+        res.check("网卡名写入 tui.env", "TWIN_TUN_DEV='tun0'" in f.read())
+
+    out = run("5\n11\n2\n\n\n0\n0\n0\n")
+    res.check("网卡名处直接回车 = 自动挑选", "网卡：自动挑选" in out)
+    with open(tui, encoding="utf-8") as f:
+        res.check("自动挑选清空 TWIN_TUN_DEV", "TWIN_TUN_DEV=''" in f.read())
 
 
 def test_parent_chain(res, root, base_env, ca, origin_port, ports):
@@ -554,6 +696,7 @@ def test_config(res, root, tmp):
         for k in list(env):
             if k.startswith("TWIN_") or k.startswith("TG_"):
                 del env[k]
+        env["TWIN_TUI_ENV"] = os.path.join(tmp, "no-such-tui.env")
         return env
 
     out1 = os.path.join(tmp, "cfg-on.cfg")
@@ -577,6 +720,79 @@ def test_config(res, root, tmp):
     text = open(out2, encoding="utf-8").read()
     res.check("config auth-off 渲染", "auth none" in text and "users " not in text and
               "allow * * * *" in text and "__TWIN_" not in text)
+
+
+def test_source_menu_start(res, root, tmp, cert_dir, run_dir, log_dir, runtime_dir):
+    """控制台（tgmenu.sh 用的 twin_start）在源码树下必须能启动。
+
+    回归点：源码树的二进制在 dist/ 里，而安装模式在 $TWIN_ROOT；twin_start 曾经
+    直接拼 $TWIN_ROOT/3proxy，导致菜单第 1 项永远报「缺少 .../3proxy」。
+    """
+    port = free_ports(1)[0]
+    env = clean_env(root, tmp, cert_dir, run_dir + "-menu", log_dir, runtime_dir)
+    env.update({"TWIN_SERVICES": "http-plain", "TWIN_HTTP_PLAIN": str(port),
+                "TWIN_AUTH": "0"})
+    setup = (
+        '. "$1/scripts/paths.sh"\n'
+        'twin_init_paths "$1/tgmenu.sh"\n'
+        '. "$1/scripts/tg-runtime.sh"\n'
+    )
+    p = subprocess.run(["sh", "-c", setup + "twin_start\n", "sh", root], env=env,
+                       cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = (p.stdout or b"").decode(errors="replace")
+    res.check("控制台 twin_start 在源码树可启动",
+              p.returncode == 0 and wait_port(port, 5), out[-300:])
+    subprocess.run(["sh", "-c", setup + "twin_stop\n", "sh", root], env=env,
+                   cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    time.sleep(0.3)
+
+
+def test_start_guard(res, root, tmp, cert_dir, run_dir, log_dir, runtime_dir):
+    """重复启动必须被拒绝，且不能破坏正在运行的实例；停止后要能重新启动。
+
+    回归点：以前重复 start 会用「抢不到端口而秒退」的新 pid 覆盖 pid 文件，
+    老进程仍在监听却没有记录 —— stop 杀不到、start 抢不到，只能重启容器。
+    """
+    port = free_ports(1)[0]
+    rd = run_dir + "-guard"
+    env = clean_env(root, tmp, cert_dir, rd, log_dir, runtime_dir)
+    env.update({"TWIN_SERVICES": "http-plain", "TWIN_HTTP_PLAIN": str(port),
+                "TWIN_AUTH": "0"})
+    setup = (
+        '. "$1/scripts/paths.sh"\n'
+        'twin_init_paths "$1/tgmenu.sh"\n'
+        '. "$1/scripts/tg-runtime.sh"\n'
+    )
+
+    def run(body):
+        p = subprocess.run(["sh", "-c", setup + body, "sh", root], env=env, cwd=root,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return p.returncode, (p.stdout or b"").decode(errors="replace")
+
+    rc, out = run("twin_start\n")
+    res.check("控制台首次启动成功", rc == 0 and wait_port(port, 5), out[-300:])
+
+    rc, out = run("twin_start\n")
+    res.check("运行中再次启动被拒绝", rc != 0 and "已经在运行" in out, out[-300:])
+    res.check("重复启动未破坏原实例",
+              wait_port(port, 3) and
+              os.path.exists(os.path.join(rd, "3proxy.pid")))
+
+    rc, out = run("twin_stop\n")
+    res.check("停止后端口释放", rc == 0 and not wait_port(port, 3), out[-200:])
+
+    rc, out = run("twin_start\n")
+    res.check("停止后可以重新启动", rc == 0 and wait_port(port, 5), out[-300:])
+
+    # 模拟「pid 文件被覆盖/删除、老进程仍在监听」的坏状态：必须能自愈
+    for f in os.listdir(rd):
+        if f.endswith(".pid"):
+            os.remove(os.path.join(rd, f))
+    rc, out = run("twin_start\n")
+    res.check("清理遗留进程后可重新启动",
+              rc == 0 and "发现上次未正常停止" in out and wait_port(port, 5), out[-300:])
+    run("twin_stop\n")
+    time.sleep(0.3)
 
 
 def test_certs(res, root, cert_dir):
@@ -606,6 +822,49 @@ def test_certs(res, root, cert_dir):
         res.check("Python 可加载 CA 与证书链", False, repr(exc))
 
 
+def test_install_dirs(res, root, tmp):
+    """install.sh 的 --config-dir / --data-dir 必须写进启动器，运行时真的用它们。"""
+    inst = os.path.join(tmp, "inst dir")          # 带空格，顺带验证引号处理
+    prefix = os.path.join(inst, "prefix")
+    cfg_dir = os.path.join(inst, "cfg dir")
+    data_dir = os.path.join(inst, "data dir")
+    launcher = os.path.join(prefix, "bin", "twingate")
+
+    p = subprocess.run(["sh", os.path.join(root, "scripts/install.sh"),
+                        "--prefix", prefix, "--config-dir", cfg_dir,
+                        "--data-dir", data_dir, "--force"],
+                       cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = p.stdout.decode("utf-8", "replace")
+    if p.returncode != 0 or not os.path.isfile(launcher):
+        res.check("安装到自定义前缀", False, out.strip().replace("\n", " ")[:160])
+        return
+    res.check("安装到自定义前缀（路径含空格）", True)
+
+    with open(launcher, encoding="utf-8") as f:
+        head = f.read()
+    res.check("启动器记下 --config-dir", ("TWIN_DEFAULT_CONFIG_DIR='%s'" % cfg_dir) in head)
+    res.check("启动器记下 --data-dir", ("TWIN_DEFAULT_DATA_DIR='%s'" % data_dir) in head)
+
+    # 运行时目录解析必须落在自定义位置，而不是退回 ~/.local。
+    p = subprocess.run([launcher, "status"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, env={**os.environ, "HOME": inst})
+    st = p.stdout.decode("utf-8", "replace")
+    res.check("status 可运行且不报错", p.returncode == 0, st.strip().replace("\n", " ")[:120])
+
+    # 证书写进自定义数据目录才算真的用上了 --data-dir。
+    if shutil.which("openssl"):
+        subprocess.run([launcher, "certs"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, env={**os.environ, "HOME": inst})
+        res.check("证书写进自定义数据目录", os.path.isdir(os.path.join(data_dir, "certs")))
+
+    p = subprocess.run(["sh", os.path.join(root, "scripts/uninstall.sh"),
+                        "--prefix", prefix, "--purge"],
+                       cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    res.check("卸载 --purge 清掉自定义配置目录",
+              p.returncode == 0 and not os.path.isdir(cfg_dir) and not os.path.isdir(data_dir),
+              p.stdout.decode("utf-8", "replace").strip()[:120])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -633,11 +892,17 @@ def main():
     try:
         test_config(res, root, tmp)
         test_parent_config(res, root, tmp)
+        test_tun_config(res, root, tmp)
         test_tui_env(res, root, tmp)
+        test_tui_tun_menu(res, root, tmp)
+        test_install_dirs(res, root, tmp)
         test_certs(res, root, cert_dir)
         if not os.path.exists(os.path.join(cert_dir, "ttp.env")):
             print("证书不可用，终止后续网络测试", flush=True)
             return 1
+
+        test_source_menu_start(res, root, tmp, cert_dir, run_dir, log_dir, runtime_dir)
+        test_start_guard(res, root, tmp, cert_dir, run_dir, log_dir, runtime_dir)
 
         base_env = clean_env(root, tmp, cert_dir, run_dir, log_dir, runtime_dir)
         base_env.update({

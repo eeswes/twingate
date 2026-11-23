@@ -3,7 +3,7 @@
 #
 # 源码树模式：由 tgmenu.sh source 本文件。
 # 安装模式：scripts/install.sh 把本文件内容直接内嵌到 <prefix>/bin/twingate，
-#           因此安装后只有这一个脚本 + lib 目录下的三个二进制，不再复制脚本树。
+#           因此安装后只有这一个脚本 + lib 目录下的几个二进制，不再复制脚本树。
 #
 # 所有函数都依赖 scripts/paths.sh 已先行执行 twin_init_paths。
 
@@ -12,6 +12,20 @@
 if ! command -v twin_parent_resolve >/dev/null 2>&1; then
     if [ -n "${TWIN_ROOT:-}" ] && [ -f "$TWIN_ROOT/scripts/parent.sh" ]; then
         . "$TWIN_ROOT/scripts/parent.sh"
+    fi
+fi
+
+# 进程生命周期辅助（重复启动拦截、遗留进程回收）：同样是源码树加载 + 安装模式内嵌。
+if ! command -v twin_start_guard >/dev/null 2>&1; then
+    if [ -n "${TWIN_ROOT:-}" ] && [ -f "$TWIN_ROOT/scripts/lifecycle.sh" ]; then
+        . "$TWIN_ROOT/scripts/lifecycle.sh"
+    fi
+fi
+
+# TUN 虚拟网卡接力（出站绑定）：同样是源码树加载 + 安装模式内嵌。
+if ! command -v twin_tun_resolve >/dev/null 2>&1; then
+    if [ -n "${TWIN_ROOT:-}" ] && [ -f "$TWIN_ROOT/scripts/tun.sh" ]; then
+        . "$TWIN_ROOT/scripts/tun.sh"
     fi
 fi
 
@@ -157,6 +171,15 @@ twin_render_config() {
             echo "[config] 上游 SOCKS5：$PARENT_DESC"
         fi
     fi
+
+    # TUN 虚拟网卡接力：在服务行上追加 -De<dev> / -e<ip>，同样要等模板落盘之后。
+    if command -v twin_tun_resolve >/dev/null 2>&1; then
+        twin_tun_resolve || return 1
+        twin_tun_apply_cfg "$OUT" || return 1
+        if [ "${TUN_ON:-0}" = 1 ]; then
+            echo "[config] TUN 接力：$(twin_tun_desc)"
+        fi
+    fi
     echo "[config] 已生成 $OUT"
 }
 
@@ -246,10 +269,12 @@ twin_start() {
     if [ "$_explicit_ftp_bind" != x ] && ! twin_has_svc ftp-plain; then TWIN_FTP_BIND=127.0.0.1; fi
     export TWIN_HTTP_BIND TWIN_SOCKS_BIND TWIN_FTP_BIND
 
-    [ -f "$TWIN_ROOT/3proxy" ] || { echo "[start] 缺少 $TWIN_ROOT/3proxy，请先构建并安装。" >&2; return 1; }
-    [ -f "$TWIN_ROOT/ttp" ]    || { echo "[start] 缺少 $TWIN_ROOT/ttp，请先构建并安装。" >&2; return 1; }
+    # 二进制目录随模式变化：安装模式在 $TWIN_ROOT，源码树在 $TWIN_ROOT/dist。
+    BINDIR=$(twin_bin_dir)
+    [ -f "$BINDIR/3proxy" ] || { echo "[start] 缺少 $BINDIR/3proxy，请先构建并安装。" >&2; return 1; }
+    [ -f "$BINDIR/ttp" ]    || { echo "[start] 缺少 $BINDIR/ttp，请先构建并安装。" >&2; return 1; }
     if [ "$need_mux" = 1 ]; then
-        [ -f "$TWIN_ROOT/tgmux" ] || { echo "[start] 缺少 $TWIN_ROOT/tgmux，请重新构建并安装。" >&2; return 1; }
+        [ -f "$BINDIR/tgmux" ] || { echo "[start] 缺少 $BINDIR/tgmux，请重新构建并安装。" >&2; return 1; }
     fi
     [ -f "$TWIN_CERT_DIR/ttp.env" ] || {
         echo "[start] 缺少证书，请先执行 'twingate certs' 或 tgmenu.sh 的证书生成。" >&2
@@ -259,6 +284,9 @@ twin_start() {
 
     RUNDIR=$TWIN_RUN_DIR
     mkdir -p "$RUNDIR" "$TWIN_LOG_DIR" || return 1
+    # 已在运行就拒绝：否则新进程抢不到端口立刻退出，还会把 pid 文件覆盖成死 pid，
+    # 老进程从此没有记录（stop 杀不到、start 起不来，只能重启容器）。
+    twin_start_guard "$RUNDIR" || return 1
     RUNTIME_DIR=$(twin_find_runtime_dir) || {
         echo "[start] 找不到可执行且可写的目录；请设置 TWIN_RUNTIME_DIR。" >&2
         return 1
@@ -272,6 +300,13 @@ twin_start() {
     twin_parent_write_state "$RUNDIR"
     if [ "${PARENT_ON:-0}" = 1 ]; then
         echo "[start] 上游 SOCKS5：$PARENT_DESC"
+    fi
+
+    # TUN 虚拟网卡接力：探测网卡与权限，结果写进运行状态供 status 显示。
+    twin_tun_resolve || return 1
+    twin_tun_write_state "$RUNDIR"
+    if [ "${TUN_ON:-0}" = 1 ]; then
+        echo "[start] TUN 接力：$(twin_tun_desc)"
     fi
 
     LISTEN_PORTS=""
@@ -292,7 +327,7 @@ twin_start() {
     [ "$need_mux" = 1 ] && BINS="$BINS tgmux"
     for bin in $BINS; do
         tmpbin="$RUNTIME_DIR/$bin.new.$$"
-        cp "$TWIN_ROOT/$bin" "$tmpbin" || return 1
+        cp "$BINDIR/$bin" "$tmpbin" || return 1
         chmod 755 "$tmpbin"
         mv -f "$tmpbin" "$RUNTIME_DIR/$bin" || return 1
     done
@@ -340,33 +375,22 @@ twin_start() {
     twin_has_svc socks-tls  && twin_start_ttp ttp-socks "$TWIN_SOCKS_TLS" "$TWIN_SOCKS_PLAIN"
     twin_has_svc ftp-tls    && twin_start_ttp ttp-ftp "$TWIN_FTP_TLS" "$TWIN_FTP_PLAIN"
     twin_has_svc mixed-tls  && twin_start_ttp ttp-mixed "$TWIN_MIXED_TLS" "$TWIN_MUX_PLAIN"
+
+    sleep 2
+    if ! twin_check_started "$RUNDIR" "$TWIN_LOG_DIR"; then
+        twin_kill_pidfiles "$RUNDIR"
+        echo "[start] 启动未完成，已回滚本次启动的进程。" >&2
+        return 1
+    fi
     echo "[start] 完成。运行 'twingate status' 查看状态。"
 }
 
 # ---------------------------------------------------------------- 停止 / 状态
 
 twin_stop() {
-    PIDS=""
-    for pidfile in "$TWIN_RUN_DIR"/*.pid; do
-        [ -f "$pidfile" ] || continue
-        pid=$(cat "$pidfile" 2>/dev/null || true)
-        [ -n "$pid" ] || continue
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" && echo "[stop] killed $(basename "$pidfile") ($pid)"
-        fi
-        PIDS="$PIDS $pid"
-        rm -f "$pidfile"
-    done
-    i=0
-    while [ "$i" -lt 5 ]; do
-        alive=0
-        for pid in $PIDS; do
-            kill -0 "$pid" 2>/dev/null && alive=1
-        done
-        [ "$alive" = 0 ] && break
-        sleep 1
-        i=$((i + 1))
-    done
+    twin_kill_pidfiles "$TWIN_RUN_DIR"
+    # 重复启动曾把 pid 文件覆盖成死 pid，老进程可能仍在监听；按 runtime 目录回收。
+    twin_sweep_orphans "$TWIN_RUN_DIR"
 }
 
 twin_status() {
@@ -383,6 +407,7 @@ $TWIN_FTP_TLS $TWIN_FTP_PLAIN $TWIN_MUX_PLAIN $TWIN_MIXED_TLS"
     [ -f "$RUNDIR/runtime-dir" ] && { echo "=== RUNTIME ==="; cat "$RUNDIR/runtime-dir"; }
     [ -f "$RUNDIR/services" ] && { echo "=== SERVICES ==="; cat "$RUNDIR/services"; }
     [ -f "$RUNDIR/parent" ] && { echo "=== PARENT ==="; cat "$RUNDIR/parent"; }
+    [ -f "$RUNDIR/tun" ] && { echo "=== TUN ==="; cat "$RUNDIR/tun"; }
 
     echo "=== PID ==="
     for pidfile in "$RUNDIR"/*.pid; do

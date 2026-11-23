@@ -9,6 +9,9 @@
 /run/listen-ports
 /run/runtime-dir
 /run/services
+/run/parent
+/run/tun
+/run/tun-check/
 
 # 证书材料全部由 scripts/gen-certs.sh 本地生成，不入库
 /run/certs/*.key

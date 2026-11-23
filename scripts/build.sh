@@ -117,5 +117,9 @@ echo "[build] tgmux (单端口协议分发器)"
 $CC_CMD -O2 -Wall -D_GNU_SOURCE "$ROOT/src/tgmux.c" -o "$DIST/tgmux"
 chmod 755 "$DIST/tgmux"
 
+echo "[build] tgtun (TUN 虚拟网卡探测)"
+$CC_CMD -O2 -Wall -D_GNU_SOURCE "$ROOT/src/tgtun.c" -o "$DIST/tgtun"
+chmod 755 "$DIST/tgtun"
+
 echo "[build] 完成："
 ls -l "$DIST"

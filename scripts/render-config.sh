@@ -15,6 +15,8 @@ load_tui_env "$TWIN_TUI_ENV"
 . "$ROOT/config/ports.env"
 # 上游 SOCKS5（parent）的解析与注入
 . "$ROOT/scripts/parent.sh"
+# TUN 虚拟网卡接力（出站绑定）
+. "$ROOT/scripts/tun.sh"
 
 OUT="${1:-${TWIN_CONFIG_PATH:-$TWIN_DATA/run/3proxy.cfg}}"
 mkdir -p "$(dirname "$OUT")" "$TWIN_LOG_DIR"
@@ -64,6 +66,14 @@ fi
 twin_parent_apply "$OUT" || exit 1
 if [ "${PARENT_ON:-0}" = 1 ]; then
     echo "[config] 上游 SOCKS5：$PARENT_DESC"
+fi
+
+# ---------------- TUN 虚拟网卡接力 ----------------
+# 追加 -De<dev> / -e<ip> 到服务行，必须在模板落盘、服务裁剪之后。
+twin_tun_resolve || exit 1
+twin_tun_apply_cfg "$OUT" || exit 1
+if [ "${TUN_ON:-0}" = 1 ]; then
+    echo "[config] TUN 接力：$(twin_tun_desc)"
 fi
 
 # 只保留 start.sh 判定需要的 3proxy 服务；直接调用本脚本时默认三个都保留。

@@ -29,8 +29,17 @@ else
 fi
 LIBDIR="$PREFIX/lib/twingate"
 LAUNCHER="$PREFIX/bin/twingate"
-CONFIG_DIR=${CONFIG_ARG:-${TWIN_CONFIG_DIR:-${HOME:-/tmp}/.local/config/twingate}}
-DATA_DIR=${DATA_ARG:-${TWIN_DATA_DIR:-${HOME:-/tmp}/.local/share/twingate}}
+CONFIG_DIR=${CONFIG_ARG:-${TWIN_CONFIG_DIR:-}}
+DATA_DIR=${DATA_ARG:-${TWIN_DATA_DIR:-}}
+
+# 安装时可能用 --config-dir / --data-dir 改过位置，优先用启动器里记下的默认值，
+# 否则 --purge 会去删 ~/.local 下根本没被用过的空目录。
+if [ -f "$LAUNCHER" ]; then
+    [ -n "$CONFIG_DIR" ] || CONFIG_DIR=$(sed -n "s/^TWIN_DEFAULT_CONFIG_DIR='\([^']*\)'\$/\1/p" "$LAUNCHER" | head -n 1)
+    [ -n "$DATA_DIR" ] || DATA_DIR=$(sed -n "s/^TWIN_DEFAULT_DATA_DIR='\([^']*\)'\$/\1/p" "$LAUNCHER" | head -n 1)
+fi
+CONFIG_DIR=${CONFIG_DIR:-${HOME:-/tmp}/.local/config/twingate}
+DATA_DIR=${DATA_DIR:-${HOME:-/tmp}/.local/share/twingate}
 
 if [ ! -e "$LAUNCHER" ] && [ ! -d "$LIBDIR" ]; then
     printf '[uninstall] 没有找到安装: %s\n' "$PREFIX"
@@ -43,13 +52,20 @@ if [ -x "$LAUNCHER" ]; then
 fi
 
 rm -f "$LAUNCHER"
-for bin in 3proxy ttp tgmux; do
+for bin in 3proxy ttp tgmux tgtun; do
     rm -f "$LIBDIR/$bin"
 done
 rmdir "$LIBDIR" 2>/dev/null || :
 printf '[uninstall] 已移除 %s 与 %s\n' "$LIBDIR" "$LAUNCHER"
 
 if [ "$PURGE" = 1 ]; then
+    for d in "$CONFIG_DIR" "$DATA_DIR"; do
+        case "$d" in
+            ""|/|"${HOME:-/nonexistent}"|"${HOME:-/nonexistent}/")
+                printf '[uninstall] 目录值异常（%s），拒绝删除。\n' "$d" >&2
+                exit 1 ;;
+        esac
+    done
     rm -rf "$CONFIG_DIR" "$DATA_DIR"
     printf '[uninstall] 已删除配置目录 %s 与数据目录 %s\n' "$CONFIG_DIR" "$DATA_DIR"
 else

@@ -142,6 +142,57 @@ sh tgmenu.sh
 - **域名仍会本地解析一次。** 即使 `socks5+` 把域名交给上游，3proxy 为了 ACL 与日志会用 `nserver`（`TWIN_DNS_SERVER`）解析一次，所以这个 DNS 要可用。
 - 状态里能看到当前链路：`twingate status` 的 `=== PARENT ===` 段，控制台首页也有「上游」一行。
 
+## TUN 虚拟网卡接力（出站绑定）
+
+如果出网线路不是 SOCKS5，而是本机 VPN 建出来的 TUN 网卡（`tun0` / `utun0` …），可以让 3proxy 的出站直接绑到那张网卡上，同样所有客户端共享它：
+
+```
+客户端 ──> TwinGate（HTTP/SOCKS/FTP，认证在这一层）
+                └─ 出站 socket 绑 tun0 ──> VPN ──> 目标
+```
+
+```sh
+# 自动挑选 tun*/utun*，并自动决定绑定方式
+TWIN_TUN=auto sh scripts/start.sh
+
+# 指定网卡（wg0 这类非 tun 名字也可以）
+TWIN_TUN=tun0 sh scripts/start.sh
+
+# 强制只绑源地址（没有 root 时的退化路径）
+TWIN_TUN=tun0 TWIN_TUN_BIND=source sh scripts/start.sh
+
+# 控制台：配置 -> 11) TUN 接力
+sh tgmenu.sh
+```
+
+控制台里进 `11) TUN 接力` 后能看到的四项就是全部操作：`1` 开关、`2` 选网卡、`3` 切绑定策略、`4` 立刻检测一次；`0` 或**直接回车**返回上一级。要指定网卡，按 `2` 再输入名字（留空 = 自动挑选），也可以**直接在这个菜单里输入 `tun0` / `wg0`**，效果和按 `2` 一样。
+
+探测与决策由 `dist/tgtun`（源码 `src/tgtun.c`）完成，启动时注入一次：
+
+1. 用 `getifaddrs()` 找 `tun*` / `utun*` 中 up 且带地址的网卡；
+2. 读 `/proc/net/route` 与 `/proc/net/ipv6_route`，看**当前生效的默认路由**（metric 最小的那条）是不是它；
+3. 承载默认路由 → 什么都不加（零配置），系统本来就从它出网；
+4. 不承载 → 给每条服务行追加参数：
+
+   - 有 root / `CAP_NET_RAW`：`-De<网卡>`，3proxy 对每个出站 socket 设置 `SO_BINDTODEVICE`；
+   - 没有权限：`-e<源地址>`，3proxy bind 到该网卡的源 IP。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `TWIN_TUN` | `off` | 开关：`0`/`1`（也可写 `auto`）；写成网卡名（`tun0`）等价于「开启 + 指定该网卡」 |
+| `TWIN_TUN_DEV` | 空 | 要绑的网卡；空 = 自动挑 `tun*` / `utun*`，也可以写 `wg0` 这类名字 |
+| `TWIN_TUN_BIND` | `auto` | `auto` 按权限决定；`device` / `source` / `direct` 强制某一种 |
+
+行为要点：
+
+- **权限是"试"出来的。** `tgtun` 真的对一个临时 socket 调用 `setsockopt(SO_BINDTODEVICE)`，只有 `EPERM` 才退到绑源地址；容器/用户命名空间里 root 也可能没有 `CAP_NET_RAW`，所以不猜 `euid`。
+- **绑网卡要求该网卡上有到目标的路由。** 绑上之后内核只在这张网卡的路由表里查，网卡上没有对应路由就直接 `ENETUNREACH`。典型 VPN 会往 TUN 里塞一条 `0.0.0.0/0`（metric 通常比物理网卡大），这种情况正好；只把少数网段指进 TUN 的分流 VPN，就只能连通那些网段。
+- **绑源地址只改源 IP，不改路由。** 没有权限时的这条退化路径只在"路由本来就指向 TUN"时有意义，否则包依旧从物理网卡出去（很可能被丢弃）。
+- **DNS 不受绑定影响。** 3proxy 的 `nserver` 用独立 socket 解析，不走 `-De`；需要解析也走隧道时，把 `TWIN_DNS_SERVER` 换成隧道内可达的 DNS，或改用上游 `socks5+` 让对端解析。
+- **只认主路由表。** `ip rule` 配的策略路由看不到；这种情况直接写 `TWIN_TUN=<网卡>`。
+- 状态里能看到结果：`twingate status` 的 `=== TUN ===` 段（`device tun0` / `source 10.8.0.2` / `direct`），控制台首页也有一行「TUN」。
+- 自测会在独立 netns 里造一张 `tun9` 并验证三种注入结果（`tests/tg_local_test.py`，没有 root 时跳过）；另外实测过：同一条 SOCKS 请求，加上 `-Detun9` 后对端看到的源地址由物理网卡 IP 变成 TUN 的 IP。
+
 ## 证书信任（信任一次即可）
 
 `scripts/gen-certs.sh` 会生成**本地 CA + 服务器证书链**，源码树模式下在 `run/certs/`，安装为单命令后改在 `~/.local/share/twingate/certs/`；SAN 自动包含 `localhost`、`127.0.0.1` 以及生成时在机器上检测到的所有 IPv4 地址。客户端只需要导入一张 `ca.crt`，之后连接 TLS 端口不再需要 `--insecure`。
@@ -163,13 +214,16 @@ Android/ReDroid 需在设置里手工安装 CA；跨平台步骤与排错见 **[
 ## 目录
 
 - `scripts/fetch-vendor.sh` — 拉取并固定上游版本
-- `scripts/build.sh` — 构建，产物在 `dist/`（`3proxy`, `ttp`, `tgmux`）
+- `scripts/build.sh` — 构建，产物在 `dist/`（`3proxy`, `ttp`, `tgmux`, `tgtun`）
 - `src/tgmux.c` — 单端口混合模式的协议分发器
+- `src/tgtun.c` — TUN 网卡探测与出站绑定决策（`dist/tgtun`）
 - `scripts/gen-certs.sh` — 生成本地 CA + 服务器证书链 + `run/certs/ttp.env`
 - `scripts/install-ca.sh` — 把 `ca.crt` 安装进当前系统信任库
 - `scripts/render-config.sh` — 由模板生成 `run/3proxy.cfg`（含认证开关与上游 parent）
 - `scripts/start.sh` / `stop.sh` / `status.sh` — 进程管理
 - `scripts/parent.sh` — 上游 SOCKS5（parent 链式出口）的解析与注入
+- `scripts/tun.sh` — TUN 接力：探测结果转成 3proxy 的 `-De` / `-e` 参数
+- `scripts/lifecycle.sh` — 重复启动拦截、遗留进程回收（安装模式内嵌进 `twingate`）
 - `scripts/load-tui-env.sh` — 按「环境变量 > `tui.env` > `ports.env` 默认值」加载配置
 - `scripts/paths.sh` — 区分程序目录、配置目录与数据目录
 - `scripts/tg-runtime.sh` — 运行逻辑函数库（安装时内嵌到 `twingate`）
@@ -183,7 +237,7 @@ Android/ReDroid 需在设置里手工安装 CA；跨平台步骤与排错见 **[
 
 ## 安装为单个命令（推荐）
 
-不想每次敲一堆 `sh scripts/xxx.sh`，可以安装成一条 `twingate` 命令。安装后 `<prefix>/bin/twingate` 是**唯一的可执行脚本**（TUI + 运行逻辑全部内嵌），`<prefix>/lib/twingate/` 里**只有 `3proxy`、`ttp`、`tgmux` 三个二进制**，不会复制脚本树、配置模板或测试文件。
+不想每次敲一堆 `sh scripts/xxx.sh`，可以安装成一条 `twingate` 命令。安装后 `<prefix>/bin/twingate` 是**唯一的可执行脚本**（TUI + 运行逻辑全部内嵌），`<prefix>/lib/twingate/` 里**只有 `3proxy`、`ttp`、`tgmux`、`tgtun` 四个二进制**，不会复制脚本树、配置模板或测试文件。
 
 目录布局（默认用户级安装）：
 
@@ -208,6 +262,8 @@ sh scripts/install.sh --user
 sh scripts/install.sh --system
 sh scripts/install.sh --termux
 ```
+
+`--prefix` / `--config-dir` / `--data-dir` 会写进生成的 `twingate` 启动器，之后运行时不用再重复指定；想临时换位置，设 `TWIN_CONFIG_DIR` / `TWIN_DATA` 环境变量即可（优先于安装时写下的值）。注意：目录是**安装时**定下的，改完要重新 `install.sh`，或者改用环境变量。
 
 安装后：
 
@@ -258,6 +314,8 @@ sh scripts/stop.sh
 
 `vendor/` 不入库（约 24 MB 上游源码）。克隆仓库后先执行 `sh scripts/fetch-vendor.sh` 拉取固定提交。
 
+**重复启动会被拒绝**（`[start] 已经在运行…`，退出码 1），不会覆盖正在运行的实例的 pid 记录；要换配置请先 `stop` 或用控制台的「重启」。若上次异常退出留下孤儿进程（pid 文件丢失但端口仍被占），`start` 会先自动清理它们，`stop` 也会按运行目录回收。
+
 环境变量覆盖示例：
 
 ```sh
@@ -280,6 +338,12 @@ make selftest
 python3 tests/tg_local_test.py
 ```
 
+TUN 接力需要真网卡才能验到底，所以另有一个需要 root 的脚本：它在独立 netns 里建 veth 对，分别验证「不绑定走物理网卡」「绑定后出站包从 TUN 发出」「绑定后经 TUN 端到端可用」：
+
+```sh
+sudo sh tests/tun_netns_check.sh
+```
+
 Makefile 里 `make test` 仍是依赖外部目标站的全量探测。
 
 ## 已知限制
@@ -292,6 +356,7 @@ Makefile 里 `make test` 仍是依赖外部目标站的全量探测。
 - 关闭认证且把明文端口绑到 `0.0.0.0` 时，任何能连到容器的设备都可直接使用代理，请自行评估网络安全。
 - 上游 `parent` 只能接力 HTTP / CONNECT / SOCKS：3proxy 的 `ftppr` 不支持链式数据通道，启用上游后 FTP 默认被拒绝（见「上游 SOCKS5」）。
 - 上游只支持单跳（固定 weight 1000）；需要多跳就在上游那侧继续接力。
+- TUN 接力只是把出站 socket 绑到网卡：不改路由表、不管 DNS、不支持策略路由；网卡上没有到目标的路由时连接会直接失败（见「TUN 虚拟网卡接力」）。
 
 ## 许可证与致谢
 

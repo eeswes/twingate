@@ -4,27 +4,8 @@ set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$ROOT/scripts/paths.sh"
 twin_init_paths "$0"
+. "$ROOT/scripts/lifecycle.sh"
 RUNDIR=${TWIN_RUN_DIR:-$TWIN_DATA/run}
-PIDS=""
-for pidfile in "$RUNDIR"/*.pid; do
-    [ -f "$pidfile" ] || continue
-    pid=$(cat "$pidfile" 2>/dev/null || true)
-    [ -n "$pid" ] || continue
-    if kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" && echo "[stop] killed $(basename "$pidfile") ($pid)"
-    fi
-    PIDS="$PIDS $pid"
-    rm -f "$pidfile"
-done
-
-# 等待进程真正退出：否则立刻 start 时可能遇到端口仍被占用或二进制 TEXT BUSY。
-i=0
-while [ "$i" -lt 5 ]; do
-    alive=0
-    for pid in $PIDS; do
-        if kill -0 "$pid" 2>/dev/null; then alive=1; fi
-    done
-    [ "$alive" = 0 ] && break
-    sleep 1
-    i=$((i + 1))
-done
+twin_kill_pidfiles "$RUNDIR"
+# 上次可能因为重复启动把 pid 文件覆盖成了死 pid，老进程仍在监听；按 runtime 目录回收。
+twin_sweep_orphans "$RUNDIR"

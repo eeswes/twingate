@@ -41,4 +41,5 @@ selftest:
 
 clean:
 	sh scripts/stop.sh || true
-	rm -f run/*.pid run/3proxy.cfg run/parent run/services run/listen-ports run/runtime-dir
+	rm -rf run/tun-check
+	rm -f run/*.pid run/3proxy.cfg run/parent run/tun run/services run/listen-ports run/runtime-dir

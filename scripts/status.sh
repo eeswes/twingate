@@ -29,6 +29,10 @@ if [ -f "$RUNDIR/parent" ]; then
     echo "=== PARENT ==="
     cat "$RUNDIR/parent"
 fi
+if [ -f "$RUNDIR/tun" ]; then
+    echo "=== TUN ==="
+    cat "$RUNDIR/tun"
+fi
 
 echo "=== PID ==="
 for pidfile in "$RUNDIR"/*.pid; do

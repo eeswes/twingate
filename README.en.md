@@ -164,6 +164,57 @@ Behaviour:
 - **Names are still resolved locally once.** Even with `socks5+` the upstream resolves the target, 3proxy resolves it too for ACLs and logs using `nserver` (`TWIN_DNS_SERVER`), so that DNS must work.
 - The active chain is visible in `twingate status` under `=== PARENT ===`, and on the console home screen.
 
+## TUN egress (binding outgoing sockets)
+
+If the egress path is not a SOCKS5 but a TUN interface created by a local VPN (`tun0` / `utun0` …), the outgoing sockets can be bound to that interface instead — every client still shares one exit.
+
+```
+client ──> TwinGate (HTTP/SOCKS/FTP, authentication here)
+              └─ outgoing socket bound to tun0 ──> VPN ──> target
+```
+
+```sh
+# pick any tun*/utun* and decide how to bind
+TWIN_TUN=auto sh scripts/start.sh
+
+# name the interface (names such as wg0 work too)
+TWIN_TUN=tun0 sh scripts/start.sh
+
+# force the source-address fallback
+TWIN_TUN=tun0 TWIN_TUN_BIND=source sh scripts/start.sh
+
+# console: Config -> 11) TUN egress
+sh tgmenu.sh
+```
+
+Inside `11) TUN egress` the four items are the whole story: `1` state, `2` interface, `3` bind mode, `4` detect now; `0` or **a bare Enter** goes back. To pick an interface press `2` and type the name (empty = auto-select), or just **type `tun0` / `wg0` right in that menu** — same result.
+
+Detection and the decision come from `dist/tgtun` (source `src/tgtun.c`) and are applied once at start:
+
+1. `getifaddrs()` finds the `tun*` / `utun*` interfaces that are up and have an address;
+2. `/proc/net/route` and `/proc/net/ipv6_route` say whether the **currently effective default route** (lowest metric) belongs to it;
+3. if it carries the default route, nothing is added — zero config, the system already egresses there;
+4. otherwise every service line gets an extra option:
+
+   - with root / `CAP_NET_RAW`: `-De<iface>`, 3proxy sets `SO_BINDTODEVICE` on each outgoing socket;
+   - without it: `-e<source-ip>`, 3proxy binds to the interface address.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TWIN_TUN` | `off` | Switch: `0`/`1` (or `auto`); an interface name (`tun0`) means "on, and use that one" |
+| `TWIN_TUN_DEV` | empty | Interface to bind; empty auto-selects `tun*` / `utun*`, names such as `wg0` work too |
+| `TWIN_TUN_BIND` | `auto` | `auto` follows the permission probe; `device` / `source` / `direct` force one strategy |
+
+Behaviour:
+
+- **Permission is probed, not guessed.** `tgtun` calls `setsockopt(SO_BINDTODEVICE)` on a throwaway socket and only falls back to the source address on `EPERM`; inside containers or user namespaces even root may lack `CAP_NET_RAW`.
+- **Device binding needs a route on that device.** Routing is then looked up on that interface only, so a target with no route there fails with `ENETUNREACH`. Typical VPNs install a `0.0.0.0/0` route on the TUN (usually with a higher metric than the physical NIC), which is exactly the case this is for; split-tunnel VPNs only cover the prefixes they route.
+- **Binding the source address does not change routing.** The unprivileged fallback only helps when routing already points at the TUN; otherwise packets still leave through the physical NIC (and are likely dropped).
+- **DNS is not bound.** 3proxy resolves `nserver` queries on its own socket, unaffected by `-De`; point `TWIN_DNS_SERVER` at a resolver reachable through the tunnel, or use an upstream `socks5+` and let the far end resolve.
+- **Main routing table only.** Policy routing (`ip rule`, extra tables) is invisible here; name the interface explicitly with `TWIN_TUN=<iface>` in that case.
+- Visible in `twingate status` under `=== TUN ===` (`device tun0` / `source 10.8.0.2` / `direct`) and on the console home screen.
+- The self-test builds a `tun9` inside its own netns and checks all three injection results (`tests/tg_local_test.py`; skipped without root). It was also verified end to end: the same SOCKS request reaches the peer from the physical address without `-Detun9`, and from the TUN address with it.
+
 ## Certificate trust (import once)
 
 `scripts/gen-certs.sh` creates a **local CA plus a server certificate chain**. It writes to
@@ -193,13 +244,14 @@ skips verification by default; enable it with `--verify` or TUI "Config -> Probe
 ## Layout
 
 - `scripts/fetch-vendor.sh` — fetch and pin upstream versions
-- `scripts/build.sh` — build; output in `dist/` (`3proxy`, `ttp`, `tgmux`)
+- `scripts/build.sh` — build; output in `dist/` (`3proxy`, `ttp`, `tgmux`, `tgtun`)
 - `src/tgmux.c` — protocol dispatcher for the mixed single-port mode
 - `scripts/gen-certs.sh` — generate the local CA + server chain + `run/certs/ttp.env`
 - `scripts/install-ca.sh` — install `ca.crt` into the current system trust store
 - `scripts/render-config.sh` — render `run/3proxy.cfg` from the template (auth + upstream parent)
 - `scripts/start.sh` / `stop.sh` / `status.sh` — process management
 - `scripts/parent.sh` — parse and inject the upstream SOCKS5 (parent chaining)
+- `scripts/lifecycle.sh` — refuse double starts, reclaim orphan processes (embedded in `twingate`)
 - `scripts/load-tui-env.sh` — load config as env vars > `tui.env` > `ports.env` defaults
 - `scripts/paths.sh` — separates program, config and data directories
 - `scripts/tg-runtime.sh` — runtime function library (embedded into `twingate` at install time)
@@ -213,7 +265,7 @@ skips verification by default; enable it with `--verify` or TUI "Config -> Probe
 
 ## Install as a single command (recommended)
 
-Instead of typing a bunch of `sh scripts/xxx.sh`, install TwinGate as one `twingate` command. After installation, `<prefix>/bin/twingate` is the **only executable script** (TUI and runtime logic are embedded), and `<prefix>/lib/twingate/` contains **only the three binaries** `3proxy`, `ttp` and `tgmux` — no script tree, config templates or tests are copied.
+Instead of typing a bunch of `sh scripts/xxx.sh`, install TwinGate as one `twingate` command. After installation, `<prefix>/bin/twingate` is the **only executable script** (TUI and runtime logic are embedded), and `<prefix>/lib/twingate/` contains **only the four binaries** `3proxy`, `ttp`, `tgmux` and `tgtun` — no script tree, config templates or tests are copied.
 
 Layout (default user-level install):
 
@@ -238,6 +290,8 @@ sh scripts/install.sh --user
 sh scripts/install.sh --system
 sh scripts/install.sh --termux
 ```
+
+`--prefix` / `--config-dir` / `--data-dir` are baked into the generated `twingate` launcher, so you do not repeat them at runtime; to override temporarily, set `TWIN_CONFIG_DIR` / `TWIN_DATA` (they win over the installed values). The locations are fixed at install time — re-run `install.sh` to change them permanently.
 
 After installation:
 
@@ -298,6 +352,11 @@ sh scripts/stop.sh
 `vendor/` is not committed (about 24 MB of upstream sources). After cloning, run
 `sh scripts/fetch-vendor.sh` to fetch the pinned commits.
 
+**Starting twice is refused** (`[start] 已经在运行…`, exit code 1) so a running instance never
+loses its pid records; stop it first or use "Restart" in the console. If a previous crash left
+orphan processes (pid files gone but ports still held), `start` cleans them up automatically and
+`stop` reclaims them by runtime directory.
+
 Environment override examples:
 
 ```sh
@@ -325,6 +384,14 @@ make selftest
 python3 tests/tg_local_test.py
 ```
 
+TUN egress can only be proven against real interfaces, so a separate root-only script builds
+veth pairs inside its own netns and checks "unbound goes through the physical NIC", "bound
+sends packets out of the TUN" and "bound works end to end through the TUN":
+
+```sh
+sudo sh tests/tun_netns_check.sh
+```
+
 `make test` remains the full probe suite that requires an external target.
 
 ## Known limitations
@@ -346,6 +413,9 @@ python3 tests/tg_local_test.py
   (see "Upstream SOCKS5").
 - Only a single upstream hop is supported (weight fixed at 1000); chain further on
   the upstream side if you need more.
+- TUN egress only binds outgoing sockets: it does not change routing, does not touch
+  DNS and does not understand policy routing. When the interface has no route to the
+  target, the connection simply fails (see "TUN egress").
 
 ## License and credits
 

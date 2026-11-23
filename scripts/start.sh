@@ -7,6 +7,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$ROOT/scripts/paths.sh"
 twin_init_paths "$0"
+. "$ROOT/scripts/lifecycle.sh"
 # 记录是否由用户显式指定各协议绑定地址（要在加载 tui.env / ports.env 之前）。
 _explicit_http_bind=${TWIN_HTTP_BIND+x}
 _explicit_socks_bind=${TWIN_SOCKS_BIND+x}
@@ -25,12 +26,24 @@ if tui_loaded TWIN_FTP_BIND;   then _explicit_ftp_bind=x;   fi
 CERTDIR=${TWIN_CERT_DIR:-$TWIN_DATA/run/certs}
 mkdir -p "$RUNDIR" "$TWIN_LOG_DIR"
 
+# 已在运行就不要再起一次：否则新进程抢不到端口立刻退出，还会把 pid 文件覆盖成死 pid，
+# 老进程从此失去记录（stop 杀不到、start 起不来，只能重启容器）。
+twin_start_guard "$RUNDIR" || exit 1
+
 # 上游 SOCKS5（parent 链式出口）：先归一化并校验，配置非法就直接退出。
 . "$ROOT/scripts/parent.sh"
 twin_parent_resolve || exit 1
 twin_parent_write_state "$RUNDIR"
 if [ "${PARENT_ON:-0}" = 1 ]; then
     echo "[start] 上游 SOCKS5：$PARENT_DESC"
+fi
+
+# TUN 虚拟网卡接力：探测 tun*/utun* 与绑定权限，结果写进运行状态。
+. "$ROOT/scripts/tun.sh"
+twin_tun_resolve || exit 1
+twin_tun_write_state "$RUNDIR"
+if [ "${TUN_ON:-0}" = 1 ]; then
+    echo "[start] TUN 接力：$(twin_tun_desc)"
 fi
 
 if [ "${TWIN_AUTH:-0}" = 1 ] &&
@@ -103,10 +116,11 @@ if [ "$_explicit_ftp_bind" != x ] && ! has_service ftp-plain; then
 fi
 export TWIN_HTTP_BIND TWIN_SOCKS_BIND TWIN_FTP_BIND
 
-[ -f "$ROOT/dist/3proxy" ] || { echo "请先执行 scripts/build.sh" >&2; exit 1; }
-[ -f "$ROOT/dist/ttp" ] || { echo "请先执行 scripts/build.sh" >&2; exit 1; }
+BINDIR=$(twin_bin_dir)
+[ -f "$BINDIR/3proxy" ] || { echo "缺少 $BINDIR/3proxy，请先执行 scripts/build.sh" >&2; exit 1; }
+[ -f "$BINDIR/ttp" ] || { echo "缺少 $BINDIR/ttp，请先执行 scripts/build.sh" >&2; exit 1; }
 if [ "$need_mux" = 1 ]; then
-    [ -f "$ROOT/dist/tgmux" ] || { echo "缺少 dist/tgmux，请先执行 scripts/build.sh" >&2; exit 1; }
+    [ -f "$BINDIR/tgmux" ] || { echo "缺少 $BINDIR/tgmux，请先执行 scripts/build.sh" >&2; exit 1; }
 fi
 [ -f "$CERTDIR/ttp.env" ] || { echo "缺少证书，请先执行 scripts/gen-certs.sh" >&2; exit 1; }
 . "$CERTDIR/ttp.env"
@@ -174,7 +188,7 @@ BINS="3proxy ttp"
 for bin in $BINS; do
     # 先写临时文件再原子替换：若旧进程尚未完全退出，直接 cp 覆盖会报 Text file busy。
     tmpbin="$RUNTIME_DIR/$bin.new.$$"
-    cp "$ROOT/dist/$bin" "$tmpbin"
+    cp "$BINDIR/$bin" "$tmpbin"
     chmod 755 "$tmpbin"
     mv -f "$tmpbin" "$RUNTIME_DIR/$bin"
 done
@@ -236,6 +250,13 @@ if has_service ftp-tls; then
 fi
 if has_service mixed-tls; then
     start_ttp ttp-mixed "$TWIN_MIXED_TLS" "$TWIN_MUX_PLAIN"
+fi
+
+sleep 2
+if ! twin_check_started "$RUNDIR" "$TWIN_LOG_DIR"; then
+    twin_kill_pidfiles "$RUNDIR"
+    echo "[start] 启动未完成，已回滚本次启动的进程。" >&2
+    exit 1
 fi
 
 echo "[start] 完成。运行 'twingate status' 或 scripts/status.sh 查看状态。"

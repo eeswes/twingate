@@ -3,9 +3,10 @@
 #
 # 安装布局（默认 --user）：
 #   ~/.local/bin/twingate              唯一的命令脚本（tgmenu.sh + 内嵌运行逻辑）
-#   ~/.local/lib/twingate/3proxy       仅这三个二进制
+#   ~/.local/lib/twingate/3proxy       仅这几个二进制
 #   ~/.local/lib/twingate/ttp
 #   ~/.local/lib/twingate/tgmux
+#   ~/.local/lib/twingate/tgtun
 #   ~/.local/config/twingate/          tui.env / 3proxy.cfg 等配置
 #   ~/.local/share/twingate/           certs / logs / run 等运行时数据
 #
@@ -94,9 +95,9 @@ for bin in 3proxy ttp; do
     }
 done
 
-# ---------------- 只安装三个二进制 ----------------
+# ---------------- 只安装二进制 ----------------
 # 先写临时文件再原子替换：旧进程还在跑时直接 cp 覆盖会报 Text file busy。
-for bin in 3proxy ttp tgmux; do
+for bin in 3proxy ttp tgmux tgtun; do
     if [ -f "$ROOT/dist/$bin" ]; then
         _tmpbin="$LIBDIR/.$bin.new.$$"
         cp "$ROOT/dist/$bin" "$_tmpbin"
@@ -117,10 +118,19 @@ strip_shebang() {
     sed '1{/^#!/d;}' "$1"
 }
 
+# 把安装时确定的目录写进启动器：否则运行时只会退回 ~/.local 默认值，
+# 让 --config-dir / --data-dir 变成只影响安装提示的摆设。
+sq() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 {
     printf '%s\n' '#!/bin/sh'
     printf '%s\n' '# TwinGate 单命令入口，由 scripts/install.sh 生成。'
     printf '%s\n' '# 程序目录只放二进制；配置与数据分别放在用户可写目录。'
+    printf 'TWIN_DEFAULT_CONFIG_DIR=%s\n' "$(sq "$CONFIG_DIR")"
+    printf 'TWIN_DEFAULT_DATA_DIR=%s\n' "$(sq "$DATA_DIR")"
+    printf '\n'
     strip_shebang "$ROOT/scripts/paths.sh"
     printf '\n'
     printf '%s\n' "twin_embedded_ports() { cat <<'$_eof_ports'"
@@ -134,6 +144,10 @@ strip_shebang() {
     printf '%s\n' '}'
     printf '\n'
     strip_shebang "$ROOT/scripts/parent.sh"
+    printf '\n'
+    strip_shebang "$ROOT/scripts/lifecycle.sh"
+    printf '\n'
+    strip_shebang "$ROOT/scripts/tun.sh"
     printf '\n'
     strip_shebang "$ROOT/scripts/tg-runtime.sh"
     printf '\n'

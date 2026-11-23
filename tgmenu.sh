@@ -39,6 +39,7 @@ TWIN_RUNTIME_DIR TWIN_MUX_PEEK_MS \
 TWIN_AUTH TWIN_AUTH_USER TWIN_AUTH_PASS TG_PROBE_VERIFY \
 TWIN_PARENT TWIN_PARENT_HOST TWIN_PARENT_PORT TWIN_PARENT_TYPE \
 TWIN_PARENT_USER TWIN_PARENT_PASS TWIN_PARENT_FTP \
+TWIN_TUN TWIN_TUN_DEV TWIN_TUN_BIND \
 TG_PROBE_HOST TG_PROBE_TARGET TG_PYTHON TWIN_UI_LANG"
 
 ALL_SERVICES="http-tls http-plain socks-tls socks-plain ftp-tls ftp-plain mixed-tls mixed-plain"
@@ -71,7 +72,7 @@ msg_zh() {
         err.quote) printf '值不能包含单引号。' ;;
         err.port.digit) printf '请输入数字端口。' ;;
         err.port.range) printf '端口范围是 1-65535。' ;;
-        err.invalid) printf '无效选择。' ;;
+        err.invalid) printf '无效选择：请输入菜单里的编号（0 返回/退出，直接回车同样返回）。' ;;
         exited) printf '[已退出]' ;;
         bye) printf '已退出。' ;;
         created.cfg) printf '已创建默认配置：' ;;
@@ -187,6 +188,35 @@ msg_zh() {
         err.parent.type) printf '类型只能是 socks5+ / socks5 / socks4 / socks4+ / connect / connect+。' ;;
         err.parent.host) printf '上游地址只能包含字母数字和 . : _ -' ;;
         main.parent) printf '上游' ;;
+        cfg.tun) printf 'TUN 接力' ;;
+        menu.tun) printf 'TUN 虚拟网卡接力（出站绑定）' ;;
+        tun.off) printf '未启用' ;;
+        tun.any) printf '任意 tun*/utun*' ;;
+        tun.none) printf '未找到 TUN' ;;
+        tun.error) printf '探测失败' ;;
+        tun.iface.missing) printf '未找到网卡' ;;
+        tun.notbuilt) printf '缺少 tgtun，请重新构建' ;;
+        tun.toggle) printf '开关' ;;
+        tun.iface) printf '网卡' ;;
+        tun.bind) printf '绑定策略' ;;
+        tun.detect) printf '检测一次（列出候选网卡）' ;;
+        tun.mode.direct) printf '已承载默认路由，零配置' ;;
+        tun.mode.device) printf 'SO_BINDTODEVICE' ;;
+        tun.mode.source) printf 'bind 源地址' ;;
+        tun.mode.auto) printf 'auto（有权限绑网卡，否则绑源地址）' ;;
+        tun.mode.direct.name) printf 'direct（不做任何绑定）' ;;
+        tun.detect.empty) printf '没有找到 tun*/utun* 网卡，或它们没有地址。' ;;
+        tun.hint1) printf '开启后 3proxy 的出站改从本机 VPN 的 TUN 网卡出网，所有客户端共享它。' ;;
+        tun.hint2) printf 'TUN 已承载默认路由时什么都不用做；否则有 root 就绑网卡，没有就绑源地址。' ;;
+        tun.hint3) printf '绑源地址只改源 IP、不改路由：目标网段不在 TUN 的路由里时仍会走物理网卡。' ;;
+        tun.hint4) printf '改网卡：按 2 再输入名字（tun0 / wg0），留空 = 自动挑选；也可以直接在这里输入网卡名。' ;;
+        ask.tun.iface) printf '网卡名（如 tun0 / wg0）' ;;
+        ask.tun.keep) printf '（直接回车 = 自动挑选）' ;;
+        err.tun.iface) printf '网卡名只能包含字母数字和 . _ -（最长 15 个字符）' ;;
+        err.tun.picknum) printf 'TUN 菜单只有 1-4 这四项；要指定网卡请按 2，或直接输入网卡名（如 tun0）。' ;;
+        tun.iface.auto) printf '网卡：自动挑选' ;;
+        tun.iface.set) printf '网卡已设为 ' ;;
+        main.tun) printf 'TUN' ;;
         lang.zh) printf '简体中文' ;;
         lang.en) printf 'English' ;;
         ask.bind) printf '明文绑定地址（127.0.0.1 或 0.0.0.0）' ;;
@@ -206,7 +236,7 @@ msg_zh() {
         m2) printf '停止代理' ;;
         m3) printf '重启代理' ;;
         m4) printf '查看状态' ;;
-        m5) printf '配置（服务 / 端口 / 绑定 / 上游 / 探测）' ;;
+        m5) printf '配置（服务 / 端口 / 绑定 / 上游 / TUN / 探测）' ;;
         m6) printf '重新构建' ;;
         m7) printf '运行全量探测（需要 python3）' ;;
         m8) printf '生成 / 更新证书' ;;
@@ -243,7 +273,7 @@ msg_en() {
         err.quote) printf 'Value must not contain a single quote.' ;;
         err.port.digit) printf 'Enter a numeric port.' ;;
         err.port.range) printf 'Port must be between 1 and 65535.' ;;
-        err.invalid) printf 'Invalid selection.' ;;
+        err.invalid) printf 'Invalid selection: type a number from the menu (0 or Enter goes back).' ;;
         exited) printf '[Exited]' ;;
         bye) printf 'Exited.' ;;
         created.cfg) printf 'Created default config: ' ;;
@@ -359,6 +389,35 @@ msg_en() {
         err.parent.type) printf 'Type must be socks5+ / socks5 / socks4 / socks4+ / connect / connect+.' ;;
         err.parent.host) printf 'Upstream address may only contain letters, digits and . : _ -' ;;
         main.parent) printf 'Upstream' ;;
+        cfg.tun) printf 'TUN egress' ;;
+        menu.tun) printf 'TUN egress (bind outgoing sockets)' ;;
+        tun.off) printf 'off' ;;
+        tun.any) printf 'any tun*/utun*' ;;
+        tun.none) printf 'no TUN found' ;;
+        tun.error) printf 'detection failed' ;;
+        tun.iface.missing) printf 'interface not found:' ;;
+        tun.notbuilt) printf 'tgtun missing, rebuild first' ;;
+        tun.toggle) printf 'State' ;;
+        tun.iface) printf 'Interface' ;;
+        tun.bind) printf 'Bind mode' ;;
+        tun.detect) printf 'Detect now (list candidates)' ;;
+        tun.mode.direct) printf 'carries the default route, zero config' ;;
+        tun.mode.device) printf 'SO_BINDTODEVICE' ;;
+        tun.mode.source) printf 'bind source address' ;;
+        tun.mode.auto) printf 'auto (device when permitted, else source)' ;;
+        tun.mode.direct.name) printf 'direct (no binding)' ;;
+        tun.detect.empty) printf 'No tun*/utun* interface with an address was found.' ;;
+        tun.hint1) printf 'Outgoing traffic leaves through the local VPN TUN interface; every client shares it.' ;;
+        tun.hint2) printf 'Nothing to do when the TUN carries the default route; otherwise bind the device (root) or the source address.' ;;
+        tun.hint3) printf 'Binding the source address does not change routing: destinations outside the TUN routes still use the physical NIC.' ;;
+        tun.hint4) printf 'To change the interface press 2 and type a name (tun0 / wg0); empty = auto-select. Typing the name right here also works.' ;;
+        ask.tun.iface) printf 'Interface name (e.g. tun0 / wg0)' ;;
+        ask.tun.keep) printf ' (press Enter for auto-select)' ;;
+        err.tun.iface) printf 'Interface names may contain only letters, digits and . _ - (max 15 chars)' ;;
+        err.tun.picknum) printf 'The TUN menu only has items 1-4; press 2 to choose an interface, or type the interface name here (e.g. tun0).' ;;
+        tun.iface.auto) printf 'Interface: auto-select' ;;
+        tun.iface.set) printf 'Interface set to ' ;;
+        main.tun) printf 'TUN' ;;
         lang.zh) printf '简体中文 (Chinese)' ;;
         lang.en) printf 'English' ;;
         ask.bind) printf 'Plain bind address (127.0.0.1 or 0.0.0.0)' ;;
@@ -438,8 +497,9 @@ confirm() {
 }
 
 # Read a non-empty value into $VAL; bare Enter returns 2 (keep current value).
+# 第二个参数可替换"直接回车保持不变"这句提示（例如 TUN 网卡里回车 = 自动挑选）。
 ask_value() {
-    printf '%s%s: ' "$1" "$(T ask.keep)"
+    printf '%s%s: ' "$1" "${2:-$(T ask.keep)}"
     read -r VAL || return 1
     [ -n "$VAL" ] || return 2
     case "$VAL" in
@@ -473,6 +533,7 @@ export_config() {
         TWIN_AUTH TWIN_AUTH_USER TWIN_AUTH_PASS TG_PROBE_VERIFY \
         TWIN_PARENT TWIN_PARENT_HOST TWIN_PARENT_PORT TWIN_PARENT_TYPE \
         TWIN_PARENT_USER TWIN_PARENT_PASS TWIN_PARENT_FTP \
+        TWIN_TUN TWIN_TUN_DEV TWIN_TUN_BIND \
         TWIN_LOG_DIR TWIN_CERT_DIR \
         TG_PROBE_HOST TG_PROBE_TARGET TG_PYTHON TWIN_UI_LANG
 }
@@ -492,6 +553,9 @@ load_config() {
     : "${TG_PROBE_TARGET:=example.com}"
     : "${TG_PYTHON:=}"
     : "${TWIN_PARENT:=0}"
+    : "${TWIN_TUN:=off}"
+    : "${TWIN_TUN_DEV:=}"
+    : "${TWIN_TUN_BIND:=auto}"
     detect_ui_lang
     export_config
 }
@@ -583,13 +647,18 @@ svc_toggle() {
 do_start() {
     printf '\n[start] %s: %s\n' "$(T act.start)" "$TWIN_SERVICES"
     twin_start
-    printf '[start] %s: %s\n' "$(T act.exit)" "$?"
+    _rc=$?
+    # 先存下 $?，否则 "$(T act.exit)" 的命令替换会把它重置成 0。
+    printf '[start] %s: %s\n' "$(T act.exit)" "$_rc"
+    return $_rc
 }
 
 do_stop() {
     printf '\n[stop] %s\n' "$(T act.stop)"
     twin_stop
-    printf '[stop] %s: %s\n' "$(T act.exit)" "$?"
+    _rc=$?
+    printf '[stop] %s: %s\n' "$(T act.exit)" "$_rc"
+    return $_rc
 }
 
 do_restart() {
@@ -612,7 +681,9 @@ do_build() {
     printf '[build] %s\n' "$(T build.note2)"
     if confirm "$(T build.confirm)"; then
         sh "$ROOT/scripts/build.sh"
-        printf '[build] %s: %s\n' "$(T act.exit)" "$?"
+        _rc=$?
+        printf '[build] %s: %s\n' "$(T act.exit)" "$_rc"
+        return $_rc
     else
         printf '[build] %s\n' "$(T build.cancelled)"
     fi
@@ -641,7 +712,9 @@ do_certs() {
     else
         twin_gen_certs
     fi
-    printf '[cert] %s: %s\n' "$(T act.exit)" "$?"
+    _rc=$?
+    printf '[cert] %s: %s\n' "$(T act.exit)" "$_rc"
+    return $_rc
 }
 
 do_install() {
@@ -862,7 +935,7 @@ menu_services() {
         printf '\n%s: ' "$(T menu.select.service)"
         read -r c || return
         case "$c" in
-            0) return ;;
+            ''|0) return ;;
             1) svc_toggle http-tls ;;
             2) svc_toggle http-plain ;;
             3) svc_toggle socks-tls ;;
@@ -900,7 +973,7 @@ menu_ports() {
             6) ask_port "$(T ports.6) $(T word.port)" && { TWIN_FTP_PLAIN=$VAL; save_config; } ;;
             7) ask_port "$(T ports.7) $(T word.port)" && { TWIN_MIXED_TLS=$VAL; save_config; } ;;
             8) ask_port "$(T ports.8) $(T word.port)" && { TWIN_MUX_PLAIN=$VAL; save_config; } ;;
-            0) return ;;
+            ''|0) return ;;
             *) printf '%s\n' "$(T err.invalid)"; pause ;;
         esac
     done
@@ -938,7 +1011,7 @@ menu_auth() {
                 esac
                 TWIN_AUTH_PASS=$VAL; save_config
                 ;;
-            0) return ;;
+            ''|0) return ;;
             *) printf '%s\n' "$(T err.invalid)"; pause ;;
         esac
     done
@@ -971,7 +1044,7 @@ menu_probe_settings() {
                 if [ "${TG_PROBE_VERIFY:-0}" = 1 ]; then TG_PROBE_VERIFY=0; else TG_PROBE_VERIFY=1; fi
                 save_config
                 ;;
-            0) return ;;
+            ''|0) return ;;
             *) printf '%s\n' "$(T err.invalid)"; pause ;;
         esac
     done
@@ -989,7 +1062,7 @@ menu_language() {
         case "$c" in
             1) TWIN_UI_LANG=zh; UI_LANG=zh; save_config; return ;;
             2) TWIN_UI_LANG=en; UI_LANG=en; save_config; return ;;
-            0) return ;;
+            ''|0) return ;;
             *) printf '%s\n' "$(T err.invalid)"; pause ;;
         esac
     done
@@ -1086,8 +1159,167 @@ menu_parent() {
             8)
                 TWIN_PARENT_USER=""; TWIN_PARENT_PASS=""; save_config
                 ;;
-            0) return ;;
+            ''|0) return ;;
             *) printf '%s\n' "$(T err.invalid)"; pause ;;
+        esac
+    done
+}
+
+# TUN 接力的一行摘要：off / 自动 → tun0 · SO_BINDTODEVICE / tun0 · bind 10.8.0.2
+tun_show() {
+    case "${TWIN_TUN:-off}" in
+        0|off|no|false|'')
+            printf '%s' "$(T tun.off)"
+            return
+            ;;
+    esac
+    if [ ! -x "$(twin_tun_bin)" ]; then
+        printf '%s' "$(T tun.notbuilt)"
+        return
+    fi
+    # twin_tun_resolve 只做探测，不改配置；失败时只影响这一行的显示。
+    if ! twin_tun_resolve >/dev/null 2>&1; then
+        case "${TUN_REASON:-}" in
+            iface-not-found) printf '%s %s' "$(T tun.iface.missing)" "${TWIN_TUN_DEV:-}" ;;
+            *)               printf '%s' "$(T tun.error)" ;;
+        esac
+        return
+    fi
+    if [ "${TUN_ON:-0}" != 1 ]; then
+        printf '%s' "$(T tun.none)"
+        return
+    fi
+    case "${TWIN_TUN:-off}" in
+        1|on|yes|true|auto) _lbl="$(T tun.any) -> $TUN_DEV" ;;
+        *)                  _lbl=$TUN_DEV ;;
+    esac
+    case "$TUN_MODE" in
+        direct) _how=$(T tun.mode.direct) ;;
+        device) _how=$(T tun.mode.device) ;;
+        source) _how="$(T tun.mode.source) $TUN_BIND_IP" ;;
+        *)      _how=$(T tun.none) ;;
+    esac
+    printf '%s · %s' "$_lbl" "$_how"
+}
+
+# 保存要绑定的网卡：空 / auto = 自动挑选。名字校验与内核 IFNAMSIZ 对齐（最长 15）。
+tun_set_iface() {
+    _ti=$1
+    if [ -z "$_ti" ] || [ "$(printf '%s' "$_ti" | tr 'A-Z' 'a-z')" = auto ]; then
+        TWIN_TUN_DEV=""
+        save_config
+        printf '%s\n' "$(T tun.iface.auto)"
+        return 0
+    fi
+    case "$_ti" in
+        *[!A-Za-z0-9_.-]*) printf '%s\n' "$(T err.tun.iface)"; return 1 ;;
+    esac
+    if [ ${#_ti} -gt 15 ]; then
+        printf '%s\n' "$(T err.tun.iface)"
+        return 1
+    fi
+    TWIN_TUN_DEV=$_ti
+    save_config
+    printf '%s%s\n' "$(T tun.iface.set)" "$_ti"
+    return 0
+}
+
+menu_tun() {
+    while :; do
+        clear_screen
+        printf '=== %s ===\n\n' "$(T menu.tun)"
+        case "${TWIN_TUN:-off}" in
+            0|off|no|false|'') st=$(T off) ;;
+            *)                 st=$(T on) ;;
+        esac
+        printf ' 1) %-16s [%s]\n' "$(T tun.toggle)" "$st"
+        ifc=${TWIN_TUN_DEV:-}
+        case "$ifc" in
+            ''|auto|any) ifc=$(T tun.any) ;;
+        esac
+        printf ' 2) %-16s %s\n' "$(T tun.iface)" "$ifc"
+        case "${TWIN_TUN_BIND:-auto}" in
+            device) bm=$(T tun.mode.device) ;;
+            source) bm=$(T tun.mode.source) ;;
+            direct) bm=$(T tun.mode.direct.name) ;;
+            *)      bm=$(T tun.mode.auto) ;;
+        esac
+        printf ' 3) %-16s %s\n' "$(T tun.bind)" "$bm"
+        printf ' 4) %s\n' "$(T tun.detect)"
+        printf '\n 0) %s\n' "$(T menu.return)"
+        printf '\n%s\n%s\n%s\n%s\n' \
+            "$(T tun.hint1)" "$(T tun.hint2)" "$(T tun.hint3)" "$(T tun.hint4)"
+        printf '\n%s: ' "$(T ask.select)"
+        read -r c || return
+        case "$c" in
+            ''|0) return ;;
+            1)
+                case "${TWIN_TUN:-off}" in
+                    0|off|no|false|'') TWIN_TUN=1 ;;
+                    *)                 TWIN_TUN=0 ;;
+                esac
+                save_config
+                ;;
+            2)
+                # ask_value: 0 = 有值，2 = 直接回车（这里语义是"自动挑选"），1 = 读失败。
+                ask_value "$(T ask.tun.iface)" "$(T ask.tun.keep)"
+                _rc=$?
+                case "$_rc" in
+                    0) tun_set_iface "$VAL" || { pause; continue; } ;;
+                    2) tun_set_iface "" ;;
+                    *) pause; continue ;;
+                esac
+                pause
+                ;;
+            3)
+                case "${TWIN_TUN_BIND:-auto}" in
+                    auto)   TWIN_TUN_BIND=device ;;
+                    device) TWIN_TUN_BIND=source ;;
+                    source) TWIN_TUN_BIND=direct ;;
+                    *)      TWIN_TUN_BIND=auto ;;
+                esac
+                save_config
+                ;;
+            4)
+                _tun_dev=${TWIN_TUN_DEV:-}
+                case "$_tun_dev" in
+                    auto|any) _tun_dev="" ;;
+                esac
+                if [ ! -x "$(twin_tun_bin)" ]; then
+                    printf '%s\n' "$(T tun.notbuilt)"
+                else
+                    if [ -n "$_tun_dev" ]; then
+                        _tun_list=$("$(twin_tun_bin)" list --iface "$_tun_dev" 2>/dev/null || true)
+                    else
+                        _tun_list=$("$(twin_tun_bin)" list 2>/dev/null || true)
+                    fi
+                    case "$_tun_list" in
+                        ''|none|not-found) printf '%s\n' "$(T tun.detect.empty)" ;;
+                        *) printf '%s\n' "$_tun_list" ;;
+                    esac
+                    echo
+                    if [ -n "$_tun_dev" ]; then
+                        "$(twin_tun_bin)" plan --iface "$_tun_dev" || true
+                    else
+                        "$(twin_tun_bin)" plan || true
+                    fi
+                fi
+                pause
+                ;;
+            *)
+                # 这里最容易踩的坑：大家会直接把网卡名当菜单项敲进来。
+                # 含字母 → 按网卡名处理；纯数字/纯符号 → 提示该按 2。
+                case "$c" in
+                    *[A-Za-z]*)
+                        tun_set_iface "$c" || :
+                        pause
+                        ;;
+                    *)
+                        printf '%s\n' "$(T err.tun.picknum)"
+                        pause
+                        ;;
+                esac
+                ;;
         esac
     done
 }
@@ -1108,6 +1340,7 @@ menu_config() {
         printf ' 8) %-20s\n' "$(T cfg.view)"
         printf ' 9) %-20s %s\n' "$(T cfg.lang)" "$UI_LANG"
         printf '10) %-20s %s\n' "$(T cfg.parent)" "$(parent_show)"
+        printf '11) %-20s %s\n' "$(T cfg.tun)" "$(tun_show)"
         printf '\n 0) %s\n' "$(T menu.back.parent)"
         printf '\n%s: ' "$(T ask.select)"
         read -r c || return
@@ -1135,7 +1368,8 @@ menu_config() {
             8) show_config; pause ;;
             9) menu_language ;;
             10) menu_parent ;;
-            0) return ;;
+            11) menu_tun ;;
+            ''|0) return ;;
             *) printf '%s\n' "$(T err.invalid)"; pause ;;
         esac
     done
@@ -1161,6 +1395,7 @@ draw_main() {
         printf ' %s: %s (%s)\n' "$(T main.auth)" "$(T off)" "$(T main.auth.off)"
     fi
     printf ' %s: %s\n' "$(T main.parent)" "$(parent_show)"
+    printf ' %s: %s\n' "$(T main.tun)" "$(tun_show)"
     printf ' %s: %s\n' "$(T main.config)" "$CFG"
     printf '%s\n' '--------------------------------------------------'
     printf '  1) %s\n' "$(T m1)"
@@ -1243,6 +1478,7 @@ main() {
             11) do_install; pause ;;
             12) do_uninstall; pause ;;
             0) printf '%s\n' "$(T bye)"; exit 0 ;;
+            '') continue ;;   # 直接回车只是重画菜单，别让手滑退出
             *) printf '%s\n' "$(T err.invalid)"; pause ;;
         esac
     done
