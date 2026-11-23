@@ -37,6 +37,8 @@ TWIN_FTP_TLS TWIN_FTP_PLAIN \
 TWIN_MIXED_TLS TWIN_MUX_PLAIN \
 TWIN_RUNTIME_DIR TWIN_MUX_PEEK_MS \
 TWIN_AUTH TWIN_AUTH_USER TWIN_AUTH_PASS TG_PROBE_VERIFY \
+TWIN_PARENT TWIN_PARENT_HOST TWIN_PARENT_PORT TWIN_PARENT_TYPE \
+TWIN_PARENT_USER TWIN_PARENT_PASS TWIN_PARENT_FTP \
 TG_PROBE_HOST TG_PROBE_TARGET TG_PYTHON TWIN_UI_LANG"
 
 ALL_SERVICES="http-tls http-plain socks-tls socks-plain ftp-tls ftp-plain mixed-tls mixed-plain"
@@ -162,6 +164,29 @@ msg_zh() {
         cfg.auth) printf '认证设置' ;;
         cfg.view) printf '查看当前配置' ;;
         cfg.lang) printf '界面语言' ;;
+        cfg.parent) printf '上游 SOCKS5' ;;
+        menu.parent) printf '上游 SOCKS5（parent 链式出口）' ;;
+        parent.toggle) printf '上游开关' ;;
+        parent.type) printf '类型' ;;
+        parent.host) printf '地址' ;;
+        parent.port) printf '端口' ;;
+        parent.user) printf '用户名' ;;
+        parent.pass) printf '密码' ;;
+        parent.ftp) printf 'FTP 代理' ;;
+        parent.ftp.off) printf '拒绝（推荐）' ;;
+        parent.ftp.direct) printf '直连（绕过上游）' ;;
+        parent.none) printf '（无）' ;;
+        parent.off) printf '未启用' ;;
+        parent.clear) printf '清除上游用户名/密码' ;;
+        parent.hint1) printf '开启后 HTTP / CONNECT / SOCKS4/5 全部经这个上游 SOCKS5 出网，所有客户端共享它。' ;;
+        parent.hint2) printf '上游不通时直接失败，不会回退直连；socks5+ 表示域名交给上游解析。' ;;
+        parent.hint3) printf 'FTP 代理（ftppr）无法走 parent：默认拒绝，选「直连」会让 FTP 暴露真实出口。' ;;
+        parent.hint4) printf '在这里改任意字段会切换成显式字段模式（TWIN_PARENT=1）。' ;;
+        ask.parent.type) printf '上游类型：socks5+ / socks5 / socks4 / socks4+ / connect / connect+' ;;
+        ask.parent.host) printf '上游地址（IP 或主机名）' ;;
+        err.parent.type) printf '类型只能是 socks5+ / socks5 / socks4 / socks4+ / connect / connect+。' ;;
+        err.parent.host) printf '上游地址只能包含字母数字和 . : _ -' ;;
+        main.parent) printf '上游' ;;
         lang.zh) printf '简体中文' ;;
         lang.en) printf 'English' ;;
         ask.bind) printf '明文绑定地址（127.0.0.1 或 0.0.0.0）' ;;
@@ -181,7 +206,7 @@ msg_zh() {
         m2) printf '停止代理' ;;
         m3) printf '重启代理' ;;
         m4) printf '查看状态' ;;
-        m5) printf '配置（服务 / 端口 / 绑定 / 探测）' ;;
+        m5) printf '配置（服务 / 端口 / 绑定 / 上游 / 探测）' ;;
         m6) printf '重新构建' ;;
         m7) printf '运行全量探测（需要 python3）' ;;
         m8) printf '生成 / 更新证书' ;;
@@ -311,6 +336,29 @@ msg_en() {
         cfg.auth) printf 'Authentication' ;;
         cfg.view) printf 'Show current configuration' ;;
         cfg.lang) printf 'Interface language' ;;
+        cfg.parent) printf 'Upstream SOCKS5' ;;
+        menu.parent) printf 'Upstream SOCKS5 (parent chaining)' ;;
+        parent.toggle) printf 'Upstream' ;;
+        parent.type) printf 'Type' ;;
+        parent.host) printf 'Address' ;;
+        parent.port) printf 'Port' ;;
+        parent.user) printf 'Username' ;;
+        parent.pass) printf 'Password' ;;
+        parent.ftp) printf 'FTP proxy' ;;
+        parent.ftp.off) printf 'deny (recommended)' ;;
+        parent.ftp.direct) printf 'direct (bypasses upstream)' ;;
+        parent.none) printf '(none)' ;;
+        parent.off) printf 'off' ;;
+        parent.clear) printf 'Clear upstream username/password' ;;
+        parent.hint1) printf 'When on, every HTTP / CONNECT / SOCKS4/5 connection egresses through this one upstream SOCKS5; all clients share it.' ;;
+        parent.hint2) printf 'If the upstream is down the connection just fails (no direct fallback); socks5+ lets the upstream resolve names.' ;;
+        parent.hint3) printf 'The FTP proxy (ftppr) cannot chain: FTP is denied by default; "direct" exposes your real egress.' ;;
+        parent.hint4) printf 'Editing any field here switches to explicit fields (TWIN_PARENT=1).' ;;
+        ask.parent.type) printf 'Upstream type: socks5+ / socks5 / socks4 / socks4+ / connect / connect+' ;;
+        ask.parent.host) printf 'Upstream address (IP or host name)' ;;
+        err.parent.type) printf 'Type must be socks5+ / socks5 / socks4 / socks4+ / connect / connect+.' ;;
+        err.parent.host) printf 'Upstream address may only contain letters, digits and . : _ -' ;;
+        main.parent) printf 'Upstream' ;;
         lang.zh) printf '简体中文 (Chinese)' ;;
         lang.en) printf 'English' ;;
         ask.bind) printf 'Plain bind address (127.0.0.1 or 0.0.0.0)' ;;
@@ -330,7 +378,7 @@ msg_en() {
         m2) printf 'Stop proxy' ;;
         m3) printf 'Restart proxy' ;;
         m4) printf 'Show status' ;;
-        m5) printf 'Configuration (services / ports / bind / probe)' ;;
+        m5) printf 'Configuration (services / ports / bind / upstream / probe)' ;;
         m6) printf 'Rebuild' ;;
         m7) printf 'Run full probe (requires python3)' ;;
         m8) printf 'Generate / update certificate' ;;
@@ -423,21 +471,27 @@ export_config() {
         TWIN_MIXED_TLS TWIN_MUX_PLAIN \
         TWIN_RUNTIME_DIR TWIN_MUX_PEEK_MS \
         TWIN_AUTH TWIN_AUTH_USER TWIN_AUTH_PASS TG_PROBE_VERIFY \
+        TWIN_PARENT TWIN_PARENT_HOST TWIN_PARENT_PORT TWIN_PARENT_TYPE \
+        TWIN_PARENT_USER TWIN_PARENT_PASS TWIN_PARENT_FTP \
         TWIN_LOG_DIR TWIN_CERT_DIR \
         TG_PROBE_HOST TG_PROBE_TARGET TG_PYTHON TWIN_UI_LANG
 }
 
 load_config() {
+    # twin_ports_init 内部按「显式环境变量 -> tui.env -> 默认值」的顺序加载，这里不再重复读。
     twin_ports_init
-    twin_load_tui_env "$CFG"
     if [ -z "${TWIN_SERVICES:-}" ]; then
         TWIN_SERVICES="http-tls,http-plain,socks-tls,socks-plain,ftp-tls,ftp-plain"
+    else
+        # 允许 TWIN_SERVICES="http-tls, socks-tls" 这种带空格的写法
+        TWIN_SERVICES=$(printf '%s' "$TWIN_SERVICES" | tr -d ' ')
     fi
     : "${TWIN_RUNTIME_DIR:=}"
     : "${TG_PROBE_VERIFY:=0}"
     : "${TG_PROBE_HOST:=127.0.0.1}"
     : "${TG_PROBE_TARGET:=example.com}"
     : "${TG_PYTHON:=}"
+    : "${TWIN_PARENT:=0}"
     detect_ui_lang
     export_config
 }
@@ -451,14 +505,28 @@ save_config() {
         eval "v=\${$k:-}"
         printf "%s='%s'\n" "$k" "$v" >> "$tmp"
     done
+    # 文件里有代理与上游密码，只给属主读。
+    chmod 600 "$tmp" 2>/dev/null || :
     mv -f "$tmp" "$CFG" || return 1
     export_config
+}
+
+# 把 URL 里的 user:pass 换成 ***，用于屏幕显示（不用于配置文件）。
+mask_url_cred() {
+    case "$1" in
+        *://*@*) printf '%s://***@%s' "${1%%://*}" "${1#*@}" ;;
+        *) printf '%s' "$1" ;;
+    esac
 }
 
 show_config() {
     printf '\n=== %s (%s) ===\n' "$(T cfg.title)" "$CFG"
     for k in $MANAGED; do
         eval "v=\${$k:-}"
+        case "$k" in
+            *_PASS) [ -n "$v" ] && v='******' ;;
+            TWIN_PARENT) v=$(mask_url_cred "$v") ;;
+        esac
         if [ -z "$v" ]; then v=$(T auto); fi
         printf '  %-20s %s\n' "$k" "$v"
     done
@@ -468,6 +536,23 @@ svc_has() {
     case ",$TWIN_SERVICES," in
         *",$1,"*) return 0 ;;
         *) return 1 ;;
+    esac
+}
+
+# 上游 SOCKS5 的一行摘要：关 / 「类型 地址:端口」 / 原始 URL 形式（凭据打码）。
+parent_show() {
+    case "${TWIN_PARENT:-0}" in
+        0|off|no|'')
+            printf '%s' "$(T parent.off)"
+            ;;
+        1|on|yes|true)
+            printf '%s %s:%s' "${TWIN_PARENT_TYPE:-socks5+}" \
+                "${TWIN_PARENT_HOST:-127.0.0.1}" "${TWIN_PARENT_PORT:-1080}"
+            ;;
+        *)
+            # URL 里可能带 user:pass，屏幕上只显示 ***@。
+            mask_url_cred "$TWIN_PARENT"
+            ;;
     esac
 }
 
@@ -828,7 +913,7 @@ menu_auth() {
         if [ "${TWIN_AUTH:-1}" = 1 ]; then st=$(T on); else st=$(T off); fi
         printf ' 1) %-14s [%s]\n' "$(T auth.toggle)" "$st"
         printf ' 2) %-14s %s\n' "$(T auth.user)" "${TWIN_AUTH_USER:-twingate}"
-        printf ' 3) %-14s %s\n' "$(T auth.pass)" "${TWIN_AUTH_PASS:-twingate123}"
+        printf ' 3) %-14s %s\n' "$(T auth.pass)" '******'
         printf '\n 0) %s\n' "$(T menu.return)"
         printf '\n%s\n' "$(T auth.hint1)"
         printf '%s\n' "$(T auth.hint2)"
@@ -910,6 +995,103 @@ menu_language() {
     done
 }
 
+# 把 URL / 简写解析出的结果固化成显式字段。
+# 必要性：TWIN_PARENT 写成 URL 时，页面上的地址与端口来自临时解析结果，
+# 直接改某一项会把 TWIN_PARENT 切换成 1，其余字段就回落到默认值、丢掉原地址。
+parent_pin_fields() {
+    TWIN_PARENT_TYPE=${PARENT_TYPE:-socks5+}
+    TWIN_PARENT_HOST=${PARENT_HOST:-127.0.0.1}
+    TWIN_PARENT_PORT=${PARENT_PORT:-1080}
+    TWIN_PARENT_USER=${PARENT_USER:-}
+    TWIN_PARENT_PASS=${PARENT_PASS:-}
+    TWIN_PARENT=1
+}
+
+menu_parent() {
+    while :; do
+        clear_screen
+        twin_parent_resolve >/dev/null 2>&1 || :
+        printf '=== %s ===\n\n' "$(T menu.parent)"
+        if [ "${PARENT_ON:-0}" = 1 ]; then st=$(T on); else st=$(T off); fi
+        printf ' 1) %-14s [%s]\n' "$(T parent.toggle)" "$st"
+        printf ' 2) %-14s %s\n' "$(T parent.type)" "${PARENT_TYPE:-socks5+}"
+        printf ' 3) %-14s %s\n' "$(T parent.host)" "${PARENT_HOST:-127.0.0.1}"
+        printf ' 4) %-14s %s\n' "$(T parent.port)" "${PARENT_PORT:-1080}"
+        printf ' 5) %-14s %s\n' "$(T parent.user)" "${PARENT_USER:-$(T parent.none)}"
+        if [ -n "${PARENT_PASS:-}" ]; then
+            printf ' 6) %-14s %s\n' "$(T parent.pass)" '******'
+        else
+            printf ' 6) %-14s %s\n' "$(T parent.pass)" "$(T parent.none)"
+        fi
+        case "${TWIN_PARENT_FTP:-off}" in
+            direct) ftpst=$(T parent.ftp.direct) ;;
+            *)      ftpst=$(T parent.ftp.off) ;;
+        esac
+        printf ' 7) %-14s %s\n' "$(T parent.ftp)" "$ftpst"
+        printf ' 8) %s\n' "$(T parent.clear)"
+        printf '\n 0) %s\n' "$(T menu.return)"
+        printf '\n%s\n%s\n%s\n%s\n' \
+            "$(T parent.hint1)" "$(T parent.hint2)" "$(T parent.hint3)" "$(T parent.hint4)"
+        printf '\n%s: ' "$(T ask.select)"
+        read -r c || return
+        case "$c" in
+            1)
+                if [ "${PARENT_ON:-0}" = 1 ]; then
+                    parent_pin_fields      # 关掉前先固化字段，重新打开不会丢地址
+                    TWIN_PARENT=0
+                else
+                    TWIN_PARENT=1
+                fi
+                save_config
+                ;;
+            2)
+                ask_value "$(T ask.parent.type)" || { pause; continue; }
+                case "$VAL" in
+                    socks4|socks4+|socks5|socks5+|connect|connect+) ;;
+                    *) printf '%s\n' "$(T err.parent.type)"; pause; continue ;;
+                esac
+                parent_pin_fields; TWIN_PARENT_TYPE=$VAL; save_config
+                ;;
+            3)
+                ask_value "$(T ask.parent.host)" || { pause; continue; }
+                case "$VAL" in
+                    *[!A-Za-z0-9.:_-]*) printf '%s\n' "$(T err.parent.host)"; pause; continue ;;
+                esac
+                parent_pin_fields; TWIN_PARENT_HOST=$VAL; save_config
+                ;;
+            4)
+                ask_port "$(T parent.port)" && { parent_pin_fields; TWIN_PARENT_PORT=$VAL; save_config; }
+                ;;
+            5)
+                ask_value "$(T ask.user)" || { pause; continue; }
+                case "$VAL" in
+                    *[!A-Za-z0-9_.@-]*) printf '%s\n' "$(T err.user)"; pause; continue ;;
+                esac
+                parent_pin_fields; TWIN_PARENT_USER=$VAL; save_config
+                ;;
+            6)
+                ask_value "$(T ask.pass)" || { pause; continue; }
+                case "$VAL" in
+                    *[!A-Za-z0-9_.@-]*) printf '%s\n' "$(T err.pass)"; pause; continue ;;
+                esac
+                parent_pin_fields; TWIN_PARENT_PASS=$VAL; save_config
+                ;;
+            7)
+                case "${TWIN_PARENT_FTP:-off}" in
+                    direct) TWIN_PARENT_FTP=off ;;
+                    *)      TWIN_PARENT_FTP=direct ;;
+                esac
+                save_config
+                ;;
+            8)
+                TWIN_PARENT_USER=""; TWIN_PARENT_PASS=""; save_config
+                ;;
+            0) return ;;
+            *) printf '%s\n' "$(T err.invalid)"; pause ;;
+        esac
+    done
+}
+
 menu_config() {
     while :; do
         clear_screen
@@ -925,6 +1107,7 @@ menu_config() {
             "$(T word.user)" "${TWIN_AUTH_USER:-twingate}" "$(T auth.toggle)" "${TWIN_AUTH:-1}"
         printf ' 8) %-20s\n' "$(T cfg.view)"
         printf ' 9) %-20s %s\n' "$(T cfg.lang)" "$UI_LANG"
+        printf '10) %-20s %s\n' "$(T cfg.parent)" "$(parent_show)"
         printf '\n 0) %s\n' "$(T menu.back.parent)"
         printf '\n%s: ' "$(T ask.select)"
         read -r c || return
@@ -951,6 +1134,7 @@ menu_config() {
             7) menu_auth ;;
             8) show_config; pause ;;
             9) menu_language ;;
+            10) menu_parent ;;
             0) return ;;
             *) printf '%s\n' "$(T err.invalid)"; pause ;;
         esac
@@ -976,6 +1160,7 @@ draw_main() {
     else
         printf ' %s: %s (%s)\n' "$(T main.auth)" "$(T off)" "$(T main.auth.off)"
     fi
+    printf ' %s: %s\n' "$(T main.parent)" "$(parent_show)"
     printf ' %s: %s\n' "$(T main.config)" "$CFG"
     printf '%s\n' '--------------------------------------------------'
     printf '  1) %s\n' "$(T m1)"

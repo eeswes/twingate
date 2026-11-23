@@ -25,6 +25,10 @@ if [ -f "$RUNDIR/services" ]; then
     echo "=== SERVICES ==="
     cat "$RUNDIR/services"
 fi
+if [ -f "$RUNDIR/parent" ]; then
+    echo "=== PARENT ==="
+    cat "$RUNDIR/parent"
+fi
 
 echo "=== PID ==="
 for pidfile in "$RUNDIR"/*.pid; do

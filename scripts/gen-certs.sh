@@ -100,7 +100,8 @@ b64() { base64 "$1" | tr -d '\n'; }
 printf 'TTP_SERVER_CERT_B64=%s\n' "$(b64 "$CERTDIR/server-chain.crt")" > "$CERTDIR/ttp.env"
 printf 'TTP_SERVER_KEY_B64=%s\n' "$(b64 "$CERTDIR/server.key")" >> "$CERTDIR/ttp.env"
 
-chmod 600 "$CERTDIR/ca.key" "$CERTDIR/server.key" 2>/dev/null || :
+# ttp.env 里有服务器私钥的 base64，和 *.key 一样只给属主读。
+chmod 600 "$CERTDIR/ca.key" "$CERTDIR/server.key" "$CERTDIR/ttp.env" 2>/dev/null || :
 
 echo "[cert] 完成：$CERTDIR"
 echo "[cert] 客户端信任文件：$CERTDIR/ca.crt"

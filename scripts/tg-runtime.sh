@@ -7,16 +7,47 @@
 #
 # 所有函数都依赖 scripts/paths.sh 已先行执行 twin_init_paths。
 
+# 上游 SOCKS5（parent）逻辑：源码树下从 scripts/parent.sh 加载；
+# 安装模式下 install.sh 已把该文件内嵌进 twingate，函数直接可用。
+if ! command -v twin_parent_resolve >/dev/null 2>&1; then
+    if [ -n "${TWIN_ROOT:-}" ] && [ -f "$TWIN_ROOT/scripts/parent.sh" ]; then
+        . "$TWIN_ROOT/scripts/parent.sh"
+    fi
+fi
+
 # ---------------------------------------------------------------- 配置加载
 
+# 注意：本文件在安装模式下会被内嵌进单文件 twingate，所以这里的加载器
+# 与 scripts/load-tui-env.sh 是同一套逻辑的两份实现，改一处必须改另一处。
 TUI_LOADED_KEYS=""
+TUI_EXPLICIT_KEYS=""
 
+twin_snapshot_explicit() {
+    TUI_EXPLICIT_KEYS=""
+    for _k in $(set | sed -n 's/^\(TWIN_[A-Za-z0-9_]*\)=.*/\1/p'); do
+        TUI_EXPLICIT_KEYS="$TUI_EXPLICIT_KEYS $_k"
+    done
+}
+
+twin_explicit_key() {
+    case " ${TUI_EXPLICIT_KEYS:-} " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 顺序：记录显式环境变量 -> 加载 tui.env -> 套用内嵌/文件端口默认值。
 twin_ports_init() {
     [ "${TWIN_PORTS_INITIALIZED:-0}" = 1 ] && return 0
+    twin_snapshot_explicit
+    twin_load_tui_env "$TWIN_TUI_ENV"
     if command -v twin_embedded_ports >/dev/null 2>&1; then
         eval "$(twin_embedded_ports)"
     elif [ -f "$TWIN_CONFIG_DIR/ports.env" ]; then
         . "$TWIN_CONFIG_DIR/ports.env"
+    elif [ -f "$TWIN_ROOT/config/ports.env" ]; then
+        # 配置目录被 --config-dir 指到别处且没带 ports.env 时，退回源码树默认值。
+        . "$TWIN_ROOT/config/ports.env"
     fi
     TWIN_PORTS_INITIALIZED=1
     export TWIN_PORTS_INITIALIZED
@@ -26,26 +57,25 @@ twin_load_tui_env() {
     TUI_LOADED_KEYS=""
     _cfg=${1:-}
     [ -f "$_cfg" ] || return 0
-    _tmp="${TMPDIR:-/tmp}/tg-tui-env.$$"
-    : > "$_tmp" || return 0
+    _src=""
+    _nl='
+'
     while IFS= read -r _line || [ -n "$_line" ]; do
         case "$_line" in
             ''|\#*) continue ;;
-            *=*)
-                _k=${_line%%=*}
-                case "$_k" in
-                    [A-Za-z_]*[A-Za-z0-9_]*) ;;
-                    *) continue ;;
-                esac
-                eval "_already=\${$_k+x}"
-                [ -n "$_already" ] && continue
-                printf '%s\n' "$_line" >> "$_tmp"
-                TUI_LOADED_KEYS="$TUI_LOADED_KEYS $_k"
-                ;;
+            *=*) ;;
+            *) continue ;;
         esac
+        _k=${_line%%=*}
+        case "$_k" in
+            [A-Za-z_]*[A-Za-z0-9_]*) ;;
+            *) continue ;;
+        esac
+        twin_explicit_key "$_k" && continue
+        _src="$_src$_line$_nl"
+        TUI_LOADED_KEYS="$TUI_LOADED_KEYS $_k"
     done < "$_cfg"
-    [ -n "$TUI_LOADED_KEYS" ] && . "$_tmp"
-    rm -f "$_tmp"
+    [ -n "$_src" ] && eval "$_src"
     return 0
 }
 
@@ -71,8 +101,9 @@ twin_template() {
 # ---------------------------------------------------------------- 配置渲染
 
 twin_render_config() {
+    # twin_ports_init 已按「显式环境变量 -> tui.env -> 默认值」的顺序把配置装好，
+    # 这里不再重复加载，避免把启动阶段改过的绑定地址又覆盖回 tui.env 的旧值。
     twin_ports_init
-    twin_load_tui_env "$TWIN_TUI_ENV"
 
     OUT=${1:-${TWIN_CONFIG_PATH:-$TWIN_3PROXY_CFG}}
     mkdir -p "$(dirname "$OUT")" "$TWIN_LOG_DIR" || return 1
@@ -85,6 +116,11 @@ twin_render_config() {
         esc=$(printf '%s' "$val" | sed -e 's/[\/&]/\\&/g')
         sed -i "s|\${$k}|$esc|g" "$OUT"
     done
+
+    # 上游 SOCKS5 先解析：auth none 下 3proxy 不检查 ACL，parent 也需要 authorizer。
+    if command -v twin_parent_resolve >/dev/null 2>&1; then
+        twin_parent_resolve || return 1
+    fi
 
     if [ "${TWIN_AUTH:-0}" = 1 ]; then
         case "${TWIN_AUTH_USER:-}" in
@@ -99,14 +135,28 @@ twin_render_config() {
         echo "[config] 认证已开启：用户 ${TWIN_AUTH_USER}"
     else
         sed -i 's|__TWIN_USERS_LINE__|# 认证已关闭（TWIN_AUTH=0）|' "$OUT"
-        sed -i 's|__TWIN_AUTH_MODE__|auth none|' "$OUT"
+        if [ "${PARENT_ON:-0}" = 1 ]; then
+            # 保留 ACL 检查，parent 才能生效（iponly 不校验密码）
+            sed -i 's|__TWIN_AUTH_MODE__|auth iponly|' "$OUT"
+            echo "[config] 认证已关闭，但为让上游 parent 生效改用 auth iponly（仍不校验密码）"
+        else
+            sed -i 's|__TWIN_AUTH_MODE__|auth none|' "$OUT"
+            echo "[config] 认证已关闭：任何客户端均可连接（TWIN_AUTH=0）"
+        fi
         sed -i 's|__TWIN_ALLOW__|* * * *|g' "$OUT"
-        echo "[config] 认证已关闭：任何客户端均可连接（TWIN_AUTH=0）"
     fi
 
     [ "${TWIN_NEED_HTTP:-1}" = 1 ] || sed -i '/^# @service:http$/,/^# @end$/d' "$OUT"
     [ "${TWIN_NEED_SOCKS:-1}" = 1 ] || sed -i '/^# @service:socks$/,/^# @end$/d' "$OUT"
     [ "${TWIN_NEED_FTP:-1}" = 1 ] || sed -i '/^# @service:ftp$/,/^# @end$/d' "$OUT"
+
+    # 上游 SOCKS5：必须在 allow 行落地之后注入（parent 挂在最后一条 allow 上）
+    if command -v twin_parent_apply >/dev/null 2>&1; then
+        twin_parent_apply "$OUT" || return 1
+        if [ "${PARENT_ON:-0}" = 1 ]; then
+            echo "[config] 上游 SOCKS5：$PARENT_DESC"
+        fi
+    fi
     echo "[config] 已生成 $OUT"
 }
 
@@ -143,13 +193,12 @@ twin_find_runtime_dir() {
 }
 
 twin_start() {
-    twin_ports_init
-
     # 显式环境变量优先；随后 tui.env 里写出的绑定键也算显式。
+    # 这两个判断必须在 twin_ports_init（补默认值）之前，否则每个键都"已存在"。
     _explicit_http_bind=${TWIN_HTTP_BIND+x}
     _explicit_socks_bind=${TWIN_SOCKS_BIND+x}
     _explicit_ftp_bind=${TWIN_FTP_BIND+x}
-    twin_load_tui_env "$TWIN_TUI_ENV"
+    twin_ports_init
     if twin_tui_loaded TWIN_HTTP_BIND;  then _explicit_http_bind=x;  fi
     if twin_tui_loaded TWIN_SOCKS_BIND; then _explicit_socks_bind=x; fi
     if twin_tui_loaded TWIN_FTP_BIND;   then _explicit_ftp_bind=x;   fi
@@ -217,6 +266,13 @@ twin_start() {
     mkdir -p "$RUNTIME_DIR"
     printf '%s\n' "$RUNTIME_DIR" > "$RUNDIR/runtime-dir"
     printf '%s\n' "$SERVICES" > "$RUNDIR/services"
+
+    # 上游 SOCKS5（parent 链式出口）：配置非法时直接拒绝启动。
+    twin_parent_resolve || return 1
+    twin_parent_write_state "$RUNDIR"
+    if [ "${PARENT_ON:-0}" = 1 ]; then
+        echo "[start] 上游 SOCKS5：$PARENT_DESC"
+    fi
 
     LISTEN_PORTS=""
     twin_has_svc http-tls    && LISTEN_PORTS="$LISTEN_PORTS $TWIN_HTTP_TLS"
@@ -326,6 +382,7 @@ $TWIN_FTP_TLS $TWIN_FTP_PLAIN $TWIN_MUX_PLAIN $TWIN_MIXED_TLS"
 
     [ -f "$RUNDIR/runtime-dir" ] && { echo "=== RUNTIME ==="; cat "$RUNDIR/runtime-dir"; }
     [ -f "$RUNDIR/services" ] && { echo "=== SERVICES ==="; cat "$RUNDIR/services"; }
+    [ -f "$RUNDIR/parent" ] && { echo "=== PARENT ==="; cat "$RUNDIR/parent"; }
 
     echo "=== PID ==="
     for pidfile in "$RUNDIR"/*.pid; do
@@ -436,7 +493,8 @@ EOF
     b64() { base64 "$1" | tr -d '\n'; }
     printf 'TTP_SERVER_CERT_B64=%s\n' "$(b64 "$CERTDIR/server-chain.crt")" > "$CERTDIR/ttp.env"
     printf 'TTP_SERVER_KEY_B64=%s\n' "$(b64 "$CERTDIR/server.key")" >> "$CERTDIR/ttp.env"
-    chmod 600 "$CERTDIR/ca.key" "$CERTDIR/server.key" 2>/dev/null || :
+    # ttp.env 里有服务器私钥的 base64，和 *.key 一样只给属主读。
+    chmod 600 "$CERTDIR/ca.key" "$CERTDIR/server.key" "$CERTDIR/ttp.env" 2>/dev/null || :
     echo "[cert] 完成：$CERTDIR"
     echo "[cert] 客户端信任文件：$CERTDIR/ca.crt"
 }
@@ -468,6 +526,12 @@ twin_install_ca() {
                 cp "$CA" "$DEST"
                 command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/dev/null 2>&1 || :
                 echo "[install-ca] 已安装到 Termux：$DEST"
+            elif [ -e /system/bin/linker64 ] || [ -d /system/app ]; then
+                # Android/ReDroid：系统 CA 不能只靠复制文件，必须走设置里的手工导入
+                adb push "$CA" /sdcard/twingate-ca.crt 2>/dev/null || \
+                    cp "$CA" /sdcard/twingate-ca.crt 2>/dev/null || :
+                echo "[install-ca] Android/ReDroid 需要手工导入：设置 -> 安全 -> 从存储设备安装 -> CA 证书"
+                echo "[install-ca] 已尝试把证书复制到 /sdcard/twingate-ca.crt"
             elif [ -d /etc/pki/ca-trust/source/anchors ]; then
                 cp "$CA" "/etc/pki/ca-trust/source/anchors/$NAME.crt"
                 command -v update-ca-trust >/dev/null 2>&1 && update-ca-trust extract || :

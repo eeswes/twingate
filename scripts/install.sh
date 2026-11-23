@@ -95,10 +95,13 @@ for bin in 3proxy ttp; do
 done
 
 # ---------------- 只安装三个二进制 ----------------
+# 先写临时文件再原子替换：旧进程还在跑时直接 cp 覆盖会报 Text file busy。
 for bin in 3proxy ttp tgmux; do
     if [ -f "$ROOT/dist/$bin" ]; then
-        cp "$ROOT/dist/$bin" "$LIBDIR/$bin"
-        chmod 755 "$LIBDIR/$bin"
+        _tmpbin="$LIBDIR/.$bin.new.$$"
+        cp "$ROOT/dist/$bin" "$_tmpbin"
+        chmod 755 "$_tmpbin"
+        mv -f "$_tmpbin" "$LIBDIR/$bin"
     fi
 done
 
@@ -129,6 +132,8 @@ strip_shebang() {
     cat "$ROOT/config/3proxy.cfg.tpl"
     printf '%s\n' "$_eof_tpl"
     printf '%s\n' '}'
+    printf '\n'
+    strip_shebang "$ROOT/scripts/parent.sh"
     printf '\n'
     strip_shebang "$ROOT/scripts/tg-runtime.sh"
     printf '\n'

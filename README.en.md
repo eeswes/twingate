@@ -3,8 +3,9 @@
 A local proxy gateway: **3proxy handles the protocols, ttp handles TLS termination**.
 It supports HTTP, SOCKS4/5 and FTP proxies, with a TLS entry point for every protocol.
 Username/password authentication is enabled by default so the gateway can be handed
-to LAN devices directly. It runs on ordinary Linux hosts and on x86_64 ReDroid
-containers (containers require the proxy to run as root).
+to LAN devices directly. Optionally, the egress can be chained through a local upstream
+SOCKS5 so every client shares one exit. It runs on ordinary Linux hosts and on x86_64
+ReDroid containers (containers require the proxy to run as root).
 
 [简体中文文档](README.md)
 
@@ -28,6 +29,8 @@ client --plain--> 3proxy <TWIN_PLAIN_BIND>:<plain port> ------------------------
   (upstream behavior — narrow access with host/container networking or a firewall if needed).
 - To let the host or LAN devices reach the plain ports, set `TWIN_PLAIN_BIND=0.0.0.0`.
   Authentication still applies.
+- Optional: use 3proxy `parent` to chain the egress through a local upstream SOCKS5 that
+  every client shares (see "Upstream SOCKS5").
 
 ## Ports (override with config/ports.env)
 
@@ -109,7 +112,8 @@ TWIN_AUTH=0 sh scripts/start.sh
 Notes:
 
 - HTTP proxy uses `Proxy-Authorization: Basic`; SOCKS5 uses RFC1929 username/password;
-  the FTP proxy follows 3proxy `ftppr` semantics with `USER`/`PASS`.
+  the FTP proxy follows 3proxy `ftppr` semantics with `USER`/`PASS`; with authentication on,
+  the FTP user name is `proxyuser:proxypass:ftpuser@ftpserver`.
 - Authentication is performed by 3proxy, so TLS and plain entries behave the same;
   ttp never parses application-layer protocols.
 - Usernames/passwords may contain only letters, digits and `. _ @ -` (3proxy config format).
@@ -117,6 +121,48 @@ Notes:
   `--pass`, or `--no-auth` to verify rejection.
 - FTP proxy authentication is not the same as logging in to a real FTP server; the
   offline self-test only verifies the 220 path.
+
+## Upstream SOCKS5 (parent chaining)
+
+TwinGate only listens; it does not own the egress path. If a SOCKS5 already runs locally (for example the local end of a tunnel), let 3proxy chain everything to it with `parent`: HTTP / CONNECT / SOCKS4/5 all leave through that one upstream, every connected device shares it, and the traffic appears with the upstream's exit address.
+
+```
+client ──> TwinGate (HTTP/SOCKS/FTP, authentication here)
+              └─ 3proxy parent 1000 socks5+ 127.0.0.1 1080 ──> upstream SOCKS5 ──> target
+```
+
+```sh
+# simplest: upstream on local port 1080
+TWIN_PARENT=1 sh scripts/start.sh
+
+# single URL (with credentials)
+TWIN_PARENT='socks5://user:pass@127.0.0.1:1080' sh scripts/start.sh
+
+# host:port, or separate fields
+TWIN_PARENT=127.0.0.1:7890 sh scripts/start.sh
+TWIN_PARENT=1 TWIN_PARENT_PORT=7890 TWIN_PARENT_TYPE=socks5 sh scripts/start.sh
+
+# console: Config -> 10) Upstream SOCKS5 (stored in config/tui.env)
+sh tgmenu.sh
+```
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TWIN_PARENT` | `0` | `0`/`1`, or `socks5://[user:pass@]host:port` / `host:port` / `[::1]:1080`; `socks5h://` / `socks4://` / `http://` are accepted too (a URL implies `socks5+`) |
+| `TWIN_PARENT_HOST` | `127.0.0.1` | Upstream host; overrides the host part of the URL |
+| `TWIN_PARENT_PORT` | `1080` | Upstream port |
+| `TWIN_PARENT_TYPE` | `socks5+` | `socks5+` lets the upstream resolve names, `socks5` resolves locally; also `socks4`/`socks4+`/`connect`/`connect+` |
+| `TWIN_PARENT_USER` / `TWIN_PARENT_PASS` | empty | Upstream credentials; letters, digits and `. _ @ -` only |
+| `TWIN_PARENT_FTP` | `off` | `off` denies the FTP proxy, `direct` lets FTP go direct (bypassing the upstream) |
+
+Behaviour:
+
+- **Always chained, never falls back to direct.** A `parent` weight is a probability out of 1000; only `1000` guarantees the chain is picked for every connection (a lower weight may go unselected, and 3proxy then connects directly), so it is pinned to `1000`. If the upstream is unreachable the request fails (HTTP 502) instead of silently connecting directly, so the real exit address never leaks. Covered by `tests/tg_local_test.py`.
+- **All clients share one upstream.** `parent` lives on the 3proxy ACL, independent of how many clients connect; 3proxy still enforces its own user/password authentication.
+- **The FTP proxy cannot chain.** 3proxy's `ftppr` has no parent support for its data channel, so the FTP block is turned into a deny (clients still receive the `220` banner, then the connection is closed on `USER`). Set `TWIN_PARENT_FTP=direct` if you really want direct FTP, knowing it exposes the real egress.
+- **ACLs are still required when authentication is off.** With `auth none`, 3proxy never evaluates allow/deny and `parent` would be ignored, so `TWIN_AUTH=0` plus an upstream automatically renders `auth iponly` (no password, ACL still enforced).
+- **Names are still resolved locally once.** Even with `socks5+` the upstream resolves the target, 3proxy resolves it too for ACLs and logs using `nserver` (`TWIN_DNS_SERVER`), so that DNS must work.
+- The active chain is visible in `twingate status` under `=== PARENT ===`, and on the console home screen.
 
 ## Certificate trust (import once)
 
@@ -151,8 +197,10 @@ skips verification by default; enable it with `--verify` or TUI "Config -> Probe
 - `src/tgmux.c` — protocol dispatcher for the mixed single-port mode
 - `scripts/gen-certs.sh` — generate the local CA + server chain + `run/certs/ttp.env`
 - `scripts/install-ca.sh` — install `ca.crt` into the current system trust store
-- `scripts/render-config.sh` — render `run/3proxy.cfg` from the template (incl. auth)
+- `scripts/render-config.sh` — render `run/3proxy.cfg` from the template (auth + upstream parent)
 - `scripts/start.sh` / `stop.sh` / `status.sh` — process management
+- `scripts/parent.sh` — parse and inject the upstream SOCKS5 (parent chaining)
+- `scripts/load-tui-env.sh` — load config as env vars > `tui.env` > `ports.env` defaults
 - `scripts/paths.sh` — separates program, config and data directories
 - `scripts/tg-runtime.sh` — runtime function library (embedded into `twingate` at install time)
 - `scripts/install.sh` / `uninstall.sh` — install/uninstall the `twingate` command
@@ -230,8 +278,8 @@ sh tgmenu.sh
 > A normal Linux host has no such limitation.
 
 The console is pure POSIX sh and needs only mksh/toybox. Menus cover start/stop/restart/status;
-service toggles, 8 ports, bind address, authentication, probe settings; rebuild; certificate
-generation; online probes; **offline self-test**; and certificate trust help. It selects
+service toggles, 8 ports, bind address, authentication, upstream SOCKS5, probe settings; rebuild;
+certificate generation; online probes; **offline self-test**; and certificate trust help. It selects
 Simplified Chinese or English automatically from the locale. Override with
 `TWIN_UI_LANG=zh` or `TWIN_UI_LANG=en`, or set it in "Config -> Interface language".
 
@@ -258,6 +306,7 @@ TWIN_HTTP_TLS=28080 sh scripts/start.sh
 TWIN_PLAIN_BIND=0.0.0.0 sh scripts/start.sh
 TWIN_MIXED=1 sh scripts/start.sh
 TWIN_AUTH=0 sh scripts/start.sh                            # disable authentication
+TWIN_PARENT=1 sh scripts/start.sh                          # chain all traffic to local SOCKS5 1080
 TWIN_RUN_DIR=/tmp/tg-run sh scripts/start.sh               # isolated runtime dir (tests)
 ```
 
@@ -265,8 +314,10 @@ TWIN_RUN_DIR=/tmp/tg-run sh scripts/start.sh               # isolated runtime di
 
 `tests/tg_local_test.py` has a built-in local HTTP origin. It starts and stops TwinGate
 automatically and covers config rendering, CA verification, SANs, plaintext and TLS paths
-for HTTP/CONNECT/SOCKS5/FTP, positive and negative authentication, and mixed single-port
-mode — **without touching any external network**:
+for HTTP/CONNECT/SOCKS5/FTP, positive and negative authentication, mixed single-port mode,
+and the **upstream SOCKS5 chain** (built-in upstream, verifies traffic really goes through it,
+and that an unreachable upstream never falls back to direct) — **without touching any external
+network**:
 
 ```sh
 make selftest
@@ -281,7 +332,8 @@ python3 tests/tg_local_test.py
 - ttp only supports TLS 1.2 and requires an IPv4 literal as the target (this project
   always uses `127.0.0.1`).
 - ttp forks one process per connection; watch ReDroid's process limit under high load.
-- The FTP proxy uses `ftppr` semantics: the username is `ftpuser@ftpserver`, and
+- The FTP proxy uses `ftppr` semantics: the username is `ftpuser@ftpserver`
+  (`proxyuser:proxypass:ftpuser@ftpserver` when authentication is on), and
   passive/active data channels require the container to allow ephemeral ports.
 - FTP proxy authentication is separate from real FTP server login; the offline test
   only verifies the 220 path.
@@ -289,6 +341,11 @@ python3 tests/tg_local_test.py
   has no such restriction.
 - With authentication disabled and plain ports bound to `0.0.0.0`, any device that
   can reach the container can use the proxy — assess your network security first.
+- The upstream `parent` chains HTTP / CONNECT / SOCKS only: 3proxy's `ftppr` has no
+  chained data channel, so FTP is denied by default once an upstream is enabled
+  (see "Upstream SOCKS5").
+- Only a single upstream hop is supported (weight fixed at 1000); chain further on
+  the upstream side if you need more.
 
 ## License and credits
 

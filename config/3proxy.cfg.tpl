@@ -16,6 +16,8 @@ __TWIN_AUTH_MODE__
 # ---------------- HTTP 代理 ----------------
 flush
 allow __TWIN_ALLOW__
+# parent 由 scripts/parent.sh 按 TWIN_PARENT 注入（必须紧跟 allow 行）
+__TWIN_PARENT__
 internal ${TWIN_HTTP_BIND}
 proxy -p${TWIN_HTTP_PLAIN}
 # @end
@@ -24,13 +26,16 @@ proxy -p${TWIN_HTTP_PLAIN}
 # ---------------- SOCKS4/5 ----------------
 flush
 allow __TWIN_ALLOW__
+# 同上：所有客户端共享同一个上游 SOCKS5
+__TWIN_PARENT__
 internal ${TWIN_SOCKS_BIND}
 socks -p${TWIN_SOCKS_PLAIN}
 # @end
 
 # @service:ftp
 # ---------------- FTP 代理 ftppr ----------------
-# 客户端用户名格式：ftpuser@ftpserver
+# 客户端用户名格式：ftpuser@ftpserver；开启认证时为 代理用户:代理密码:ftpuser@ftpserver
+# 注意：ftppr 不支持 parent 链式转发，启用上游时本段会被改成 deny。
 flush
 allow __TWIN_ALLOW__
 internal ${TWIN_FTP_BIND}

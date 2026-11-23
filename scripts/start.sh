@@ -7,21 +7,31 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$ROOT/scripts/paths.sh"
 twin_init_paths "$0"
-# 记录是否由用户显式指定各协议绑定地址（要在 sourcing ports.env 之前）。
+# 记录是否由用户显式指定各协议绑定地址（要在加载 tui.env / ports.env 之前）。
 _explicit_http_bind=${TWIN_HTTP_BIND+x}
 _explicit_socks_bind=${TWIN_SOCKS_BIND+x}
 _explicit_ftp_bind=${TWIN_FTP_BIND+x}
+# 直接调用本脚本时也读取 tgmenu.sh 保存的配置；顺序必须是
+# 「记录显式环境变量 -> tui.env -> ports.env 默认值」，显式环境变量优先。
+. "$ROOT/scripts/load-tui-env.sh"
+tui_snapshot_explicit
+load_tui_env "$TWIN_TUI_ENV"
 . "$ROOT/config/ports.env"
 RUNDIR=${TWIN_RUN_DIR:-$TWIN_DATA/run}
-# 直接调用本脚本时也读取 tgmenu.sh 保存的配置；显式环境变量优先。
-. "$ROOT/scripts/load-tui-env.sh"
-load_tui_env "$TWIN_TUI_ENV"
 # tui.env 里显式写出的绑定地址也算用户指定，不应被下面的回环保护覆盖。
 if tui_loaded TWIN_HTTP_BIND;  then _explicit_http_bind=x;  fi
 if tui_loaded TWIN_SOCKS_BIND; then _explicit_socks_bind=x; fi
 if tui_loaded TWIN_FTP_BIND;   then _explicit_ftp_bind=x;   fi
 CERTDIR=${TWIN_CERT_DIR:-$TWIN_DATA/run/certs}
 mkdir -p "$RUNDIR" "$TWIN_LOG_DIR"
+
+# 上游 SOCKS5（parent 链式出口）：先归一化并校验，配置非法就直接退出。
+. "$ROOT/scripts/parent.sh"
+twin_parent_resolve || exit 1
+twin_parent_write_state "$RUNDIR"
+if [ "${PARENT_ON:-0}" = 1 ]; then
+    echo "[start] 上游 SOCKS5：$PARENT_DESC"
+fi
 
 if [ "${TWIN_AUTH:-0}" = 1 ] &&
    [ "${TWIN_AUTH_USER:-}" = twingate ] && [ "${TWIN_AUTH_PASS:-}" = twingate123 ]; then
