@@ -101,7 +101,13 @@ for bin in 3proxy ttp tgmux tgtun; do
     if [ -f "$ROOT/dist/$bin" ]; then
         _tmpbin="$LIBDIR/.$bin.new.$$"
         cp "$ROOT/dist/$bin" "$_tmpbin"
-        chmod 755 "$_tmpbin"
+        if ! chmod 755 "$_tmpbin" 2>/dev/null; then
+            rm -f "$_tmpbin"
+            printf '[install] 无法给 %s 设置可执行位。\n' "$LIBDIR/$bin" >&2
+            printf '[install] %s 可能在不支持可执行位的文件系统上（如 /sdcard）。\n' "$LIBDIR" >&2
+            printf '[install] 安装目录必须可执行，请换一个 --prefix，例如默认的 ~/.local。\n' >&2
+            exit 1
+        fi
         mv -f "$_tmpbin" "$LIBDIR/$bin"
     fi
 done
@@ -154,7 +160,13 @@ sq() {
     strip_shebang "$ROOT/tgmenu.sh"
 } > "$_tmp"
 
-chmod 755 "$_tmp"
+if ! chmod 755 "$_tmp" 2>/dev/null; then
+    printf '[install] 无法给 %s 设置可执行位。\n' "$LAUNCHER" >&2
+    printf '[install] %s 可能在不支持可执行位的文件系统上（如 /sdcard）。\n' "$BINDIR" >&2
+    printf '[install] 请换一个 --prefix，例如默认的 ~/.local。\n' >&2
+    rm -f "$_tmp"
+    exit 1
+fi
 mv -f "$_tmp" "$LAUNCHER"
 
 printf '[install] 完成。运行: %s start\n' "$LAUNCHER"

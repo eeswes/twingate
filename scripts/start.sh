@@ -38,13 +38,9 @@ if [ "${PARENT_ON:-0}" = 1 ]; then
     echo "[start] 上游 SOCKS5：$PARENT_DESC"
 fi
 
-# TUN 虚拟网卡接力：探测 tun*/utun* 与绑定权限，结果写进运行状态。
-. "$ROOT/scripts/tun.sh"
-twin_tun_resolve || exit 1
-twin_tun_write_state "$RUNDIR"
-if [ "${TUN_ON:-0}" = 1 ]; then
-    echo "[start] TUN 接力：$(twin_tun_desc)"
-fi
+# TUN 虚拟网卡接力的解析放在"二进制已复制到可执行目录"之后：
+# 项目目录在 /sdcard 这类 noexec 文件系统上时，dist/tgtun 没有执行位，
+# 必须先由下面的复制步骤搬到可执行目录，否则这里会误报"缺少 tgtun"。
 
 if [ "${TWIN_AUTH:-0}" = 1 ] &&
    [ "${TWIN_AUTH_USER:-}" = twingate ] && [ "${TWIN_AUTH_PASS:-}" = twingate123 ]; then
@@ -117,10 +113,21 @@ fi
 export TWIN_HTTP_BIND TWIN_SOCKS_BIND TWIN_FTP_BIND
 
 BINDIR=$(twin_bin_dir)
-[ -f "$BINDIR/3proxy" ] || { echo "缺少 $BINDIR/3proxy，请先执行 scripts/build.sh" >&2; exit 1; }
-[ -f "$BINDIR/ttp" ] || { echo "缺少 $BINDIR/ttp，请先执行 scripts/build.sh" >&2; exit 1; }
+# 这里只区分"文件不存在"和"存在但不可执行"：后者在 /sdcard 这类 noexec
+# 目录上很常见，下面的复制步骤会把它搬到可执行目录并 chmod，所以不算错误。
+for _b in 3proxy ttp; do
+    twin_bin_state "$BINDIR/$_b"
+    if [ $? = 1 ]; then
+        echo "缺少 $_b（$BINDIR/$_b）。请先执行：sh scripts/build.sh" >&2
+        exit 1
+    fi
+done
 if [ "$need_mux" = 1 ]; then
-    [ -f "$BINDIR/tgmux" ] || { echo "缺少 $BINDIR/tgmux，请先执行 scripts/build.sh" >&2; exit 1; }
+    twin_bin_state "$BINDIR/tgmux"
+    if [ $? = 1 ]; then
+        echo "缺少 tgmux（$BINDIR/tgmux），混合模式需要它。请先执行：sh scripts/build.sh" >&2
+        exit 1
+    fi
 fi
 [ -f "$CERTDIR/ttp.env" ] || { echo "缺少证书，请先执行 scripts/gen-certs.sh" >&2; exit 1; }
 . "$CERTDIR/ttp.env"
@@ -185,13 +192,33 @@ echo "[start] 开放服务：$SERVICES"
 # 从 noexec 的项目目录复制到可执行目录。
 BINS="3proxy ttp"
 [ "$need_mux" = 1 ] && BINS="$BINS tgmux"
+# tgtun 也要复制：/sdcard 上它没有执行位，直接调 dist/tgtun 会失败。
+# 它只在 TUN 接力开启时真正执行，缺了不影响其它服务。
+[ -f "$BINDIR/tgtun" ] && BINS="$BINS tgtun"
 for bin in $BINS; do
     # 先写临时文件再原子替换：若旧进程尚未完全退出，直接 cp 覆盖会报 Text file busy。
     tmpbin="$RUNTIME_DIR/$bin.new.$$"
-    cp "$BINDIR/$bin" "$tmpbin"
-    chmod 755 "$tmpbin"
+    cp "$BINDIR/$bin" "$tmpbin" || {
+        echo "[start] 复制 $BINDIR/$bin 到 $RUNTIME_DIR 失败。" >&2
+        rm -f "$tmpbin"
+        exit 1
+    }
+    chmod 755 "$tmpbin" 2>/dev/null || true
     mv -f "$tmpbin" "$RUNTIME_DIR/$bin"
 done
+# 让 scripts/tun.sh 优先用可执行目录里的那份，而不是 noexec 的 dist/。
+if [ -f "$RUNTIME_DIR/tgtun" ] && [ -x "$RUNTIME_DIR/tgtun" ]; then
+    TWIN_TUN_BIN_RUN="$RUNTIME_DIR/tgtun"
+    export TWIN_TUN_BIN_RUN
+fi
+
+# TUN 接力：探测 tun*/utun* 与绑定权限，结果写进运行状态。
+. "$ROOT/scripts/tun.sh"
+twin_tun_resolve || exit 1
+twin_tun_write_state "$RUNDIR"
+if [ "${TUN_ON:-0}" = 1 ]; then
+    echo "[start] TUN 接力：$(twin_tun_desc)"
+fi
 
 # Android 上必须确认是 bionic 二进制。
 # 宿主机 gcc 编出来的二进制 interpreter 是 /lib64/ld-linux-x86-64.so.2，
@@ -233,7 +260,7 @@ if [ "$need_http$need_socks$need_ftp" != 000 ]; then
 fi
 
 if [ "$need_mux" = 1 ]; then
-    export TWIN_MUX_PEEK_MS
+    export TWIN_MUX_PEEK_MS TWIN_MUX_FTP_GRACE_MS
     start_one tgmux "$RUNTIME_DIR/tgmux" \
         "$TWIN_MUX_PLAIN" "$TWIN_HTTP_PLAIN" "$TWIN_SOCKS_PLAIN" \
         "$TWIN_FTP_PLAIN" "$TWIN_MUX_BIND"

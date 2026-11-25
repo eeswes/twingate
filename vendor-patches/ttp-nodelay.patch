@@ -1,0 +1,54 @@
+diff --git a/ttp.c b/ttp.c
+index 882121b..1b3c9b9 100644
+--- a/ttp.c
++++ b/ttp.c
+@@ -17,6 +17,7 @@
+ #include <signal.h>
+ #include <fcntl.h>
+ #include <time.h>
++#include <netinet/tcp.h>
+ 
+ #ifdef USE_BEARSSL
+ #include "bearssl-layer.h"
+@@ -225,6 +226,23 @@ cleanup:
+ 	return ret;
+ }
+ 
++/**
++ * @brief Disables Nagle on a connected socket (TwinGate local patch)
++ *
++ * TTP 转发的是交互式小包：TLS 握手最后一段是 6 字节的 CCS 紧跟 45 字节的
++ * Finished，若前一个小包未被确认，Nagle 会压住后一个，而对端走 40ms 的
++ * delayed-ACK 定时器，于是每条连接都白等一个 40ms 台阶。关掉即可。
++ * 失败不影响功能，只是慢，故只记日志。
++ */
++static void set_tcp_nodelay(int fd)
++{
++	int on = 1;
++
++	if (fd >= 0 &&
++	    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on)) < 0)
++		log_message("Unable to set TCP_NODELAY: %s", strerror(errno));
++}
++
+ /**
+  * @brief Creates and connects socket to target server
+  *
+@@ -259,6 +277,7 @@ static int connect_to_target(const char *host, int port)
+ 		return -1;
+ 	}
+ 
++	set_tcp_nodelay(target_sock);
+ 	return target_sock;
+ }
+ 
+@@ -435,6 +454,9 @@ static void handle_client(int ssl_sock)
+ 	struct sockaddr_in addr;
+ 	socklen_t addr_len;
+ 
++	/* 握手和后续转发都靠小包往返，先把 Nagle 关掉。 */
++	set_tcp_nodelay(ssl_sock);
++
+ 	ctx      = xmalloc(sizeof(struct ssl_server_context));
+ 	addr_len = sizeof(addr);
+ 

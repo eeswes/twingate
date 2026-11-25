@@ -39,6 +39,10 @@ clone_or_update https://github.com/3proxy/3proxy.git "$VENDOR/3proxy-lts" "$PROX
 clone_or_update https://github.com/Theldus/ttp.git "$VENDOR/ttp" "$TTP_COMMIT"
 clone_or_update https://www.bearssl.org/git/BearSSL "$VENDOR/ttp/BearSSL" "$BEARSSL_COMMIT"
 
+# 拉完立刻打本地补丁：checkout 出来的始终是干净上游，改动静默丢失太隐蔽。
+. "$ROOT/scripts/vendor-patch.sh"
+twin_vendor_patch_all "$ROOT" || echo "[vendor] 警告：本地补丁未应用，构建会再试一次" >&2
+
 echo "[vendor] 完成。提交："
 echo "  3proxy(0.9 LTS) $PROXY_LTS_COMMIT"
 echo "  ttp             $TTP_COMMIT"

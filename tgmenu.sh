@@ -39,7 +39,7 @@ TWIN_RUNTIME_DIR TWIN_MUX_PEEK_MS \
 TWIN_AUTH TWIN_AUTH_USER TWIN_AUTH_PASS TG_PROBE_VERIFY \
 TWIN_PARENT TWIN_PARENT_HOST TWIN_PARENT_PORT TWIN_PARENT_TYPE \
 TWIN_PARENT_USER TWIN_PARENT_PASS TWIN_PARENT_FTP \
-TWIN_TUN TWIN_TUN_DEV TWIN_TUN_BIND \
+TWIN_TUN TWIN_TUN_DEV TWIN_TUN_BIND TWIN_TIMEOUTS \
 TG_PROBE_HOST TG_PROBE_TARGET TG_PYTHON TWIN_UI_LANG"
 
 ALL_SERVICES="http-tls http-plain socks-tls socks-plain ftp-tls ftp-plain mixed-tls mixed-plain"
@@ -189,13 +189,25 @@ msg_zh() {
         err.parent.host) printf '上游地址只能包含字母数字和 . : _ -' ;;
         main.parent) printf '上游' ;;
         cfg.tun) printf 'TUN 接力' ;;
+        cfg.timeout) printf '超时设置' ;;
+        menu.timeout) printf '超时设置（秒）' ;;
+        tmo.connect) printf '连目标超时' ;;
+        tmo.conn) printf '客户端空闲超时' ;;
+        tmo.dns) printf 'DNS 解析超时' ;;
+        tmo.default) printf '恢复默认' ;;
+        tmo.hint1) printf '连目标超时（CONNECT_TO）：连不上目标后放弃的时间。走公网慢代理时' ;;
+        tmo.hint2) printf '  太短会表现为「有时候能连、有时候隧道失败」，建议 30~45。' ;;
+        tmo.hint3) printf 'DNS 解析超时（DNS_TO）：3proxy 自己解析域名时的单次等待，连不上会' ;;
+        tmo.hint4) printf '  表现为「第一次几秒、之后 2~3 秒」。收紧到 5 秒，或改用本机 DNS。' ;;
+        ask.tmo.sec) printf '秒数' ;;
         menu.tun) printf 'TUN 虚拟网卡接力（出站绑定）' ;;
         tun.off) printf '未启用' ;;
         tun.any) printf '任意 tun*/utun*' ;;
         tun.none) printf '未找到 TUN' ;;
         tun.error) printf '探测失败' ;;
         tun.iface.missing) printf '未找到网卡' ;;
-        tun.notbuilt) printf '缺少 tgtun，请重新构建' ;;
+        tun.notbuilt) printf '缺少 tgtun，请先构建' ;;
+        tun.noexec) printf 'tgtun 没有可执行权限（/sdcard 等不支持执行位），请换目录构建' ;;
         tun.toggle) printf '开关' ;;
         tun.iface) printf '网卡' ;;
         tun.bind) printf '绑定策略' ;;
@@ -390,13 +402,25 @@ msg_en() {
         err.parent.host) printf 'Upstream address may only contain letters, digits and . : _ -' ;;
         main.parent) printf 'Upstream' ;;
         cfg.tun) printf 'TUN egress' ;;
+        cfg.timeout) printf 'Timeouts' ;;
+        menu.timeout) printf 'Timeouts (seconds)' ;;
+        tmo.connect) printf 'Connect to target' ;;
+        tmo.conn) printf 'Client idle' ;;
+        tmo.dns) printf 'DNS lookup' ;;
+        tmo.default) printf 'Restore defaults' ;;
+        tmo.hint1) printf 'Connect timeout (CONNECT_TO): give up on an unreachable target. Too' ;;
+        tmo.hint2) printf '  short looks like "sometimes it works, sometimes the tunnel fails". 30-45.' ;;
+        tmo.hint3) printf 'DNS timeout (DNS_TO): one lookup done by 3proxy itself. A dead resolver' ;;
+        tmo.hint4) printf '  shows as "slow once, then 2-3s". Try 5 seconds, or a local resolver.' ;;
+        ask.tmo.sec) printf 'seconds' ;;
         menu.tun) printf 'TUN egress (bind outgoing sockets)' ;;
         tun.off) printf 'off' ;;
         tun.any) printf 'any tun*/utun*' ;;
         tun.none) printf 'no TUN found' ;;
         tun.error) printf 'detection failed' ;;
         tun.iface.missing) printf 'interface not found:' ;;
-        tun.notbuilt) printf 'tgtun missing, rebuild first' ;;
+        tun.notbuilt) printf 'tgtun missing, build first' ;;
+        tun.noexec) printf 'tgtun is not executable (noexec fs), build elsewhere' ;;
         tun.toggle) printf 'State' ;;
         tun.iface) printf 'Interface' ;;
         tun.bind) printf 'Bind mode' ;;
@@ -533,7 +557,7 @@ export_config() {
         TWIN_AUTH TWIN_AUTH_USER TWIN_AUTH_PASS TG_PROBE_VERIFY \
         TWIN_PARENT TWIN_PARENT_HOST TWIN_PARENT_PORT TWIN_PARENT_TYPE \
         TWIN_PARENT_USER TWIN_PARENT_PASS TWIN_PARENT_FTP \
-        TWIN_TUN TWIN_TUN_DEV TWIN_TUN_BIND \
+        TWIN_TUN TWIN_TUN_DEV TWIN_TUN_BIND TWIN_TIMEOUTS \
         TWIN_LOG_DIR TWIN_CERT_DIR \
         TG_PROBE_HOST TG_PROBE_TARGET TG_PYTHON TWIN_UI_LANG
 }
@@ -1050,6 +1074,65 @@ menu_probe_settings() {
     done
 }
 
+# ---- 超时设置 ----------------------------------------------------------
+# TWIN_TIMEOUTS 是 3proxy 的 11 个超时，按位取值很容易写错位置（CONNECT_TO 在第 9 位），
+# 所以这里只暴露最常调的三个，其余位保持原样。
+#   位置（从 1 数）：1 SINGLEBYTE_S 2 SINGLEBYTE_L 3 STRING_S 4 STRING_L
+#                  5 CONNECTION_S 6 CONNECTION_L 7 DNS_TO 8 CHAIN_TO
+#                  9 CONNECT_TO 10 CONNBACK_TO 11 LINGER_TO
+TMO_DEFAULT="1 5 30 60 180 1800 15 60 15 5 5"
+
+# tmo_field <位置> <新值>：把第 N 位换成新值，输出完整的 11 位串。
+tmo_field() {
+    _pos=$1; _val=$2; _i=1; _out=""
+    for _f in ${TWIN_TIMEOUTS:-$TMO_DEFAULT}; do
+        if [ "$_i" = "$_pos" ]; then _out="$_out $_val"; else _out="$_out $_f"; fi
+        _i=$((_i + 1))
+    done
+    # 配置被手工改短时补齐到 11 位，否则最后几位会整体前移（CONNECT_TO 就跑位了）。
+    while [ "$_i" -le 11 ]; do
+        _d=$(printf '%s\n' "$TMO_DEFAULT" | cut -d' ' -f"$_i")
+        _out="$_out $_d"
+        _i=$((_i + 1))
+    done
+    printf '%s' "$_out" | sed 's/^ //'
+}
+
+tmo_get() {
+    printf '%s\n' "${TWIN_TIMEOUTS:-$TMO_DEFAULT}" | cut -d' ' -f"$1"
+}
+
+menu_timeouts() {
+    while :; do
+        clear_screen
+        printf '=== %s ===\n\n' "$(T menu.timeout)"
+        printf ' 1) %-18s %s %s\n' "$(T tmo.connect)" "$(tmo_get 9)" "$(T ask.tmo.sec)"
+        printf ' 2) %-18s %s %s\n' "$(T tmo.conn)" "$(tmo_get 5)" "$(T ask.tmo.sec)"
+        printf ' 3) %-18s %s %s\n' "$(T tmo.dns)" "$(tmo_get 7)" "$(T ask.tmo.sec)"
+        printf ' 4) %s\n' "$(T tmo.default)"
+        printf '\n 0) %s\n' "$(T menu.return)"
+        printf '\n%s\n%s\n%s\n%s\n' \
+            "$(T tmo.hint1)" "$(T tmo.hint2)" "$(T tmo.hint3)" "$(T tmo.hint4)"
+        printf '\n%s: ' "$(T ask.select)"
+        read -r c || return
+        case "$c" in
+            1|2|3)
+                case "$c" in
+                    1) _pos=9 ;;   # CONNECT_TO
+                    2) _pos=5 ;;   # CONNECTION_S
+                    3) _pos=7 ;;   # DNS_TO
+                esac
+                ask_port "$(T ask.tmo.sec)" || { pause; continue; }
+                TWIN_TIMEOUTS=$(tmo_field "$_pos" "$VAL")
+                save_config
+                ;;
+            4) TWIN_TIMEOUTS=$TMO_DEFAULT; save_config ;;
+            ''|0) return ;;
+            *) printf '%s\n' "$(T err.invalid)"; pause ;;
+        esac
+    done
+}
+
 menu_language() {
     while :; do
         clear_screen
@@ -1173,10 +1256,11 @@ tun_show() {
             return
             ;;
     esac
-    if [ ! -x "$(twin_tun_bin)" ]; then
-        printf '%s' "$(T tun.notbuilt)"
-        return
-    fi
+    twin_bin_state "$(twin_tun_bin)"
+    case $? in
+        1) printf '%s' "$(T tun.notbuilt)"; return ;;
+        2) printf '%s' "$(T tun.noexec)"; return ;;
+    esac
     # twin_tun_resolve 只做探测，不改配置；失败时只影响这一行的显示。
     if ! twin_tun_resolve >/dev/null 2>&1; then
         case "${TUN_REASON:-}" in
@@ -1286,7 +1370,12 @@ menu_tun() {
                     auto|any) _tun_dev="" ;;
                 esac
                 if [ ! -x "$(twin_tun_bin)" ]; then
-                    printf '%s\n' "$(T tun.notbuilt)"
+                    twin_bin_state "$(twin_tun_bin)"
+                    if [ $? = 2 ]; then
+                        printf '%s\n' "$(T tun.noexec)"
+                    else
+                        printf '%s\n' "$(T tun.notbuilt)"
+                    fi
                 else
                     if [ -n "$_tun_dev" ]; then
                         _tun_list=$("$(twin_tun_bin)" list --iface "$_tun_dev" 2>/dev/null || true)
@@ -1341,6 +1430,8 @@ menu_config() {
         printf ' 9) %-20s %s\n' "$(T cfg.lang)" "$UI_LANG"
         printf '10) %-20s %s\n' "$(T cfg.parent)" "$(parent_show)"
         printf '11) %-20s %s\n' "$(T cfg.tun)" "$(tun_show)"
+        printf '12) %-20s %s\n' "$(T cfg.timeout)" \
+            "$(T tmo.connect) $(tmo_get 9)s / $(T tmo.dns) $(tmo_get 7)s"
         printf '\n 0) %s\n' "$(T menu.back.parent)"
         printf '\n%s: ' "$(T ask.select)"
         read -r c || return
@@ -1369,6 +1460,7 @@ menu_config() {
             9) menu_language ;;
             10) menu_parent ;;
             11) menu_tun ;;
+            12) menu_timeouts ;;
             ''|0) return ;;
             *) printf '%s\n' "$(T err.invalid)"; pause ;;
         esac

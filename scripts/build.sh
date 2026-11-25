@@ -70,6 +70,22 @@ esac
 
 mkdir -p "$DIST"
 
+# /sdcard 这类 noexec 文件系统上，install -m / chmod 会直接失败，但文件本身
+# 已经写好了。scripts/start.sh 会把二进制复制到可执行目录再 chmod，所以这里
+# 绝不能因为"设不了执行位"而中断构建——那看起来像编译失败，其实是文件系统限制。
+copy_bin() {
+    if install -m 755 "$1" "$2" 2>/dev/null; then
+        return 0
+    fi
+    cp -f "$1" "$2" || return 1
+    chmod 755 "$2" 2>/dev/null || true
+    return 0
+}
+
+chmod_bin() {
+    chmod 755 "$1" 2>/dev/null || true
+}
+
 clean_3proxy_objects() {
     cd "$PROXY_SRC"
     find src -maxdepth 1 -name '*.o' -type f -exec rm -f {} + 2>/dev/null || true
@@ -102,24 +118,35 @@ if ! build_3proxy_try "$FULL_DEFS"; then
     echo "[build] 3proxy: 完整特性失败，改用 Android/bionic 精简特性重试"
     build_3proxy_try "$SAFE_DEFS"
 fi
-install -m 755 "$PROXY_SRC/bin/3proxy" "$DIST/3proxy"
+copy_bin "$PROXY_SRC/bin/3proxy" "$DIST/3proxy"
 for f in 3proxy_proxy 3proxy_socks 3proxy_ftppr; do
-    [ -f "$PROXY_SRC/bin/$f" ] && install -m 755 "$PROXY_SRC/bin/$f" "$DIST/$f"
+    [ -f "$PROXY_SRC/bin/$f" ] && copy_bin "$PROXY_SRC/bin/$f" "$DIST/$f"
 done
 
 echo "[build] ttp (BearSSL)"
+# ttp 的 TCP_NODELAY 等本地修改以补丁形式保存，vendor/ 每次拉取都是干净的上游。
+. "$ROOT/scripts/vendor-patch.sh"
+twin_vendor_patch_all "$ROOT"
 cd "$ROOT/vendor/ttp"
 make clean >/dev/null 2>&1 || true
 make -j"$JOBS" CC="$CC_CMD" LDFLAGS="$TTP_LDFLAGS"
-install -m 755 ttp "$DIST/ttp"
+copy_bin ttp "$DIST/ttp"
 
 echo "[build] tgmux (单端口协议分发器)"
 $CC_CMD -O2 -Wall -D_GNU_SOURCE "$ROOT/src/tgmux.c" -o "$DIST/tgmux"
-chmod 755 "$DIST/tgmux"
+chmod_bin "$DIST/tgmux"
 
 echo "[build] tgtun (TUN 虚拟网卡探测)"
 $CC_CMD -O2 -Wall -D_GNU_SOURCE "$ROOT/src/tgtun.c" -o "$DIST/tgtun"
-chmod 755 "$DIST/tgtun"
+chmod_bin "$DIST/tgtun"
 
 echo "[build] 完成："
 ls -l "$DIST"
+
+# 没有执行位不等于构建失败：文件已经生成，start.sh 会复制到可执行目录再运行。
+# 但必须说明白，否则用户会以为编译挂了，反复重建。
+if [ ! -x "$DIST/3proxy" ]; then
+    echo ""
+    echo "[build] 提示：$DIST 所在文件系统不支持可执行位（noexec，/sdcard 常见）。"
+    echo "[build]       二进制已生成，scripts/start.sh 会先复制到可执行目录再运行。"
+fi

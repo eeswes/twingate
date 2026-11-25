@@ -24,12 +24,30 @@ mkdir -p "$(dirname "$OUT")" "$TWIN_LOG_DIR"
 cp "$ROOT/config/3proxy.cfg.tpl" "$OUT"
 for k in TWIN_HTTP_PLAIN TWIN_SOCKS_PLAIN TWIN_FTP_PLAIN TWIN_DNS_SERVER \
          TWIN_EXTERNAL TWIN_LOG_DIR TWIN_PLAIN_BIND \
-         TWIN_HTTP_BIND TWIN_SOCKS_BIND TWIN_FTP_BIND; do
+         TWIN_HTTP_BIND TWIN_SOCKS_BIND TWIN_FTP_BIND TWIN_TIMEOUTS; do
     eval "val=\${$k}"
     # 转义 sed 替换串中的特殊字符
     esc=$(printf '%s' "$val" | sed -e 's/[\/&]/\\&/g')
     sed -i "s|\${$k}|$esc|g" "$OUT"
 done
+
+# timeouts 的校验放在赋值之后：3proxy 对超时是"静默截断"的——少写一个数就少一个超时，
+# 多写一个数被忽略，写错位置还会让 CONNECT_TO 变成别的值，症状是"偶尔隧道失败"。
+# 十一个字段必须是正整数，否则直接拒绝生成配置（错误的超时比没有更麻烦）。
+_tmo_count=0
+for _t in $TWIN_TIMEOUTS; do
+    case "$_t" in
+        ''|*[!0-9]*) _tmo_bad=1 ;;
+        *) [ "$_t" -gt 0 ] || _tmo_bad=1 ;;
+    esac
+    _tmo_count=$((_tmo_count + 1))
+done
+if [ "${_tmo_bad:-0}" = 1 ] || [ "$_tmo_count" -ne 11 ]; then
+    echo "[config] timeouts 需要 11 个正整数，当前是 $_tmo_count 个：$TWIN_TIMEOUTS" >&2
+    echo "[config] 顺序：SINGLEBYTE_S SINGLEBYTE_L STRING_S STRING_L CONNECTION_S" >&2
+    echo "[config]       CONNECTION_L DNS_TO CHAIN_TO CONNECT_TO CONNBACK_TO LINGER_TO" >&2
+    exit 1
+fi
 
 # ---------------- 上游 SOCKS5（parent 链式出口） ----------------
 # 注意：parent 挂在 allow 规则上，而 3proxy 只有在 auth 带 authorizer（strong/iponly）

@@ -51,9 +51,19 @@ The default is the 6-port topology above. With `TWIN_MIXED=1`, two ports are use
 | Plain entry | 37890 (`TWIN_MUX_PLAIN`) | `tgmux` protocol dispatcher |
 
 HTTP / CONNECT / SOCKS5 / FTP all share these two ports. `tgmux` dispatches on the first
-byte: `0x04`/`0x05` → SOCKS, `USER`/`OPEN` → FTP, anything else → HTTP. If a client sends
-no data within `TWIN_MUX_PEEK_MS` (500 ms by default), the connection is treated as FTP
-because `ftppr` sends a 220 banner first.
+byte: `0x04`/`0x05` → SOCKS, `USER`/`OPEN` → FTP, anything else → HTTP.
+
+A client that **speaks first** takes the fast path: it sends its request right after the
+connect (browsers and curl both do), one `poll(…, 0)` dispatches it immediately and `ftppr`
+is never touched.
+
+Only a **silent** client triggers FTP detection: `tgmux` connects to `ftppr` (which sends its
+`220` banner at once), **holds the banner back**, and gives the client `TWIN_MUX_FTP_GRACE_MS`
+(150 ms by default) to speak up. If it does, the first byte decides; if it stays silent, the
+connection is FTP and the banner is forwarded verbatim. That grace period is unavoidable: a
+silent FTP client and a browser preconnect (TCP opened early, request sent later) look
+identical on the wire, so only time can tell them apart. The old code blindly waited 500 ms;
+now the first FTP response arrives after "banner + 150 ms".
 
 ```sh
 sh scripts/stop.sh
@@ -241,9 +251,134 @@ for cross-platform steps and troubleshooting. Without an installed CA, the probe
 skips verification by default; enable it with `--verify` or TUI "Config -> Probe settings
 -> Certificate verification".
 
+## Latency and CPU
+
+### Nagle is off
+
+The tail of a TLS handshake is a 6-byte CCS immediately followed by a 45-byte Finished. If the peer uses a 40ms delayed ACK, Nagle holds the second small record back, so **every new connection** pays a 40ms step. Inside the container (RTT≈0, connections reused) it is invisible; from the host it is very obvious.
+
+`ttp` and `tgmux` now set `TCP_NODELAY` on connected sockets (3proxy has it on by default upstream). Measured on docker0 (RTT 0.25ms, 10 fresh connections each): the `ttp` TLS handshake dropped from **43.7~45.7ms to 2.6~4.8ms**.
+
+### TLS 1.2 session resumption
+
+Browsers open many connections to the same proxy port; a full handshake each time means
+redoing ECDHE and the certificate signature every time — that is where the CPU goes.
+
+`ttp` is fork-per-connection, so an in-process cache never survives a handshake. BearSSL's LRU
+session cache therefore lives in a `MAP_SHARED` anonymous mapping: parent and children see the
+same physical page, guarded by a spinlock that also lives in shared memory (the critical
+section is a single ~100-byte memcpy, so no pthread dependency is needed). When a client
+returns the previous 32-byte session id, the server runs an abbreviated handshake and skips
+key exchange and signing.
+
+Measured on docker0, 30 consecutive connections: full handshake ≈3.0ms, resumed **0.74ms**;
+with the cache off all 30 were full handshakes. 24 concurrent handshakes completed without
+failures, so the lock keeps the LRU index intact.
+
+Cache size is `TTP_SESSION_CACHE_KB` (64 by default, ~650 sessions; `0` disables it). A
+smaller cache only lowers the hit rate, never correctness.
+
+### Timeouts: why the tunnel "sometimes" fails
+
+3proxy's `timeouts` holds 11 values; two of them dominate when an upstream proxy sits in the
+path:
+
+| Value | Position | Default | Meaning |
+| --- | --- | --- | --- |
+| `CONNECT_TO` | 9th | 15s | one attempt to reach the target (or the upstream) |
+| `DNS_TO` | 7th | 15s | one lookup when 3proxy resolves a name itself |
+
+**`DNS_TO` is the usual source of "slow the first time, then 2-3s".** `nserver` is plaintext
+UDP 53: it ignores the TUN binding and does not travel through the upstream proxy. With `8.8.8.8`
+in a container on a typical Chinese network that query is usually dropped, so every new name
+waits out the full `DNS_TO`. Measured with a resolver that swallows packets and never answers:
+**15.01s per request** at the default, **5.01s** with `DNS_TO=5` — exactly the configured value.
+The first request is the slow one because `nscache` keeps successful answers.
+
+Fixes, in order of preference:
+1. **Point `TWIN_DNS_SERVER` at a resolver that actually works from the container** (ISP, home
+   router, or one you run on `127.0.0.1`). This is the real fix.
+2. Enable an upstream with `socks5+` so the far end resolves — but 3proxy still resolves locally
+   once for ACLs and logs, so this hop cannot be removed by that alone.
+3. Tighten `DNS_TO` (TUI: Config → Timeouts, or `TWIN_DNS_TO=5`) so a dead resolver fails fast
+   instead of stalling.
+
+**A `CONNECT_TO` that is too short shows up as `ERR_TUNNEL_CONNECTION_FAILED`.** A public proxy
+needs anywhere from a few hundred ms to seconds to answer; if the occasional attempt crosses the
+limit 3proxy replies `502` and drops the tunnel, which Chrome reports as a tunnel failure — hence
+"it works, except sometimes". 30-45 is a safer value.
+
+Measured against `10.255.255.1:9` (unroutable, no SYN reply): `CONNECT_TO=3` produced a response
+in **6.007s** and `CONNECT_TO=8` in **16.017s** — exactly double. `strace` shows two `connect()`
+calls to the **same address** (not IPv6 then IPv4 — 3proxy resolves A records only by default),
+each consuming the full `CONNECT_TO`. So **`CONNECT_TO` applies per attempt**, and a hopeless
+target costs up to twice that.
+
+All three are editable in TUI (Config → Timeouts) or via
+`TWIN_CONNECT_TO` / `TWIN_DNS_TO` / `TWIN_CONNECTION_S`, or as the whole list in
+`TWIN_TIMEOUTS="1 5 30 60 180 1800 15 60 15 5 5"`. Malformed values (wrong count, non-numeric)
+make rendering fail with the expected order spelled out — 3proxy itself ignores extras and
+silently shifts values, and a config error is far easier to find than a runtime one.
+
+When unsure whether DNS is the culprit, run `twingate status`: the `=== DNS ===` section prints the
+configured `nserver` and timeouts next to a real plaintext query it just made. Tens of
+milliseconds means it works; `timeout >6s` means it is unreachable from the container, and no
+`DNS_TO` value fixes that — only pointing `TWIN_DNS_SERVER` elsewhere does.
+
+### "Domain is slow, IP is fast" is usually CDN steering, not slow DNS
+
+Measured on one machine inside one minute:
+
+| Target | ping | TCP | TLS | Total |
+| --- | --- | --- | --- | --- |
+| `example.com` (resolves to Cloudflare `172.66.147.243` / `104.20.23.154`) | 200ms, **20% loss** | 200ms | 440-1240ms | 0.8-1.7s |
+| `example.com` pinned to `202.89.233.100` (Akamai, another edge of the same site) | 30ms, **0% loss** | 29ms | 100ms | 0.12-0.46s |
+| `https://202.89.233.100/` (IP in the URL) | 30ms, 0% loss | 29ms | 96-147ms | 0.12-0.5s |
+
+`8.8.8.8`, `223.5.5.5` and `119.29.29.29` all returned the same Cloudflare pair, and resolving took
+**7-40ms**. The slow part is not the lookup — it is **the address the lookup returns**:
+
+- A CDN picks the edge closest to *the resolver's* egress, not necessarily to you. Typing an IP
+  skips that decision and lands on one specific edge; if it happens to be the near one, it is an
+  order of magnitude faster.
+- A TLS handshake costs 2 RTT plus the certificate (several flights). One lost packet means an RTO
+  (~1s), so loss hurts TLS far more than a single SYN: TCP stays at 200ms while TLS jumps between
+  440ms and 1.2s. That is where "1-3 seconds, varies" comes from.
+- 3proxy uses only the configured `nserver` and **never reads `/etc/resolv.conf`**, so changing the
+  system resolver does nothing for the proxy. `nscache` then keeps whichever address it got for the
+  whole TTL (usually 300s).
+- To confirm: `curl -w '%{time_connect} %{time_appconnect}\n' --resolve example.com:443:202.89.233.100 https://example.com/`
+  — same hostname, only the resolved address differs.
+
+Fixing it means getting an answer that suits your location: point `TWIN_DNS_SERVER` at the carrier's
+(or a local) resolver and compare the addresses it hands back against the public ones.
+
+### Testing this project through a public proxy is misleading
+
+If the container egresses via a public proxy and the host connects back in, what you measure is
+"public proxy RTT × hops", not TwinGate's own cost, and it swings wildly. To judge TwinGate
+itself, run the upstream on the host and let the container connect to it: RTT≈0, and what remains
+is TwinGate's few milliseconds (TLS handshake + auth + one relay).
+
+Even then "container → host proxy → back to host" stays a little slower than direct, and that gap
+is structural, not a bug: the same machine gains an extra TCP + TLS + auth + relay (≈1-3ms) while
+direct is zero hops. It shows up as TTFB, felt as "slightly sluggish" in a browser. The only way
+to shrink it is fewer hops — drop `tgmux` by setting `TWIN_SERVICES=http-tls,socks-tls` when you
+do not need FTP.
+
+### Keeping the patches
+
+`vendor/` is not tracked, so upstream changes live in `vendor-patches/`:
+`ttp-nodelay.patch` and `ttp-session-cache.patch`. `fetch-vendor.sh` and `build.sh` apply them
+in order and idempotently before compiling, so re-fetching upstream never loses them. Without
+a `patch` command the build fails loudly instead of silently shipping the slow version.
+**Editing files under `vendor/` without updating the matching patch means the next
+`make vendor` throws the change away.**
+
 ## Layout
 
 - `scripts/fetch-vendor.sh` — fetch and pin upstream versions
+- `scripts/vendor-patch.sh` — apply local patches to upstream sources idempotently (see `vendor-patches/`)
 - `scripts/build.sh` — build; output in `dist/` (`3proxy`, `ttp`, `tgmux`, `tgtun`)
 - `src/tgmux.c` — protocol dispatcher for the mixed single-port mode
 - `scripts/gen-certs.sh` — generate the local CA + server chain + `run/certs/ttp.env`
@@ -351,6 +486,13 @@ sh scripts/stop.sh
 
 `vendor/` is not committed (about 24 MB of upstream sources). After cloning, run
 `sh scripts/fetch-vendor.sh` to fetch the pinned commits.
+
+**If the project sits on `/sdcard`**: that filesystem is noexec and refuses the execute bit.
+The build still succeeds — the binaries in `dist/` simply lack `x` — and `scripts/start.sh`
+copies them to an executable directory (default `~/.twingate/bin`), `chmod`s them, and starts
+from there. Nothing for you to do. The build prints a note when this happens; if you see
+"exists but is not executable", that is **not** a build failure and rebuilding will not change
+it — follow the hint and move the project, or set `TWIN_RUNTIME_DIR`.
 
 **Starting twice is refused** (`[start] 已经在运行…`, exit code 1) so a running instance never
 loses its pid records; stop it first or use "Restart" in the console. If a previous crash left

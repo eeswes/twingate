@@ -2,8 +2,15 @@
 # 3proxy 明文端口默认只监听回环；TLS 入口由 ttp 负责。
 
 nserver ${TWIN_DNS_SERVER}
+# nserver 是明文 UDP 53：串到上游代理后面、或者真的出了国，这里就是"第一次几秒、
+# 之后 2~3 秒"的主要来源。用 TWIN_DNS_TIMEOUTS 收紧超时与重试次数。
 nscache 65536
-timeouts 1 5 30 60 180 1800 15 60
+# ${TWIN_TIMEOUTS} 由渲染脚本按 TWIN_*_TIMEOUT 拼出（见 config/ports.env）：
+#   SINGLEBYTE_S SINGLEBYTE_L STRING_S STRING_L CONNECTION_S CONNECTION_L
+#   DNS_TO CHAIN_TO CONNECT_TO CONNBACK_TO LINGER_TO
+# 默认值：1 5 30 60 180 1800 15 60 15 5 5（上游是慢的外网代理时，
+# CONNECT_TO=15 太短，"有时候能连、有时候 ERR_TUNNEL_CONNECTION_FAILED"多半是它）。
+timeouts ${TWIN_TIMEOUTS}
 log ${TWIN_LOG_DIR}/3proxy.log
 logformat "- +_L%t.%.  %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 

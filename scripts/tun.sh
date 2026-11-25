@@ -26,7 +26,13 @@
 #   TUN_REASON   决策原因代码（由调用方翻译成提示语）
 
 # tgtun 的位置：安装模式在 $TWIN_ROOT，源码树在 $TWIN_ROOT/dist。
+# 项目目录在 noexec 文件系统（/sdcard）时，start.sh 会把它复制到可执行目录，
+# 并通过 TWIN_TUN_BIN_RUN 指过来；那份才真正能执行。
 twin_tun_bin() {
+    if [ -n "${TWIN_TUN_BIN_RUN:-}" ] && [ -x "$TWIN_TUN_BIN_RUN" ]; then
+        printf '%s\n' "$TWIN_TUN_BIN_RUN"
+        return 0
+    fi
     printf '%s/tgtun\n' "$(twin_bin_dir)"
 }
 
@@ -85,10 +91,9 @@ twin_tun_resolve() {
     esac
 
     _tun_bin=$(twin_tun_bin)
-    if [ ! -x "$_tun_bin" ]; then
-        printf '[tun] 缺少 %s，请重新构建（scripts/build.sh）后再启动。\n' "$_tun_bin" >&2
-        return 1
-    fi
+    # 区分"没构建"和"有文件但没执行位"：后者在 /sdcard 上很常见，
+    # 反复重建不会有任何变化，只会让人以为构建失败。
+    twin_bin_diagnose "$_tun_bin" tgtun || return 1
 
     # 只取 key=value，逐行解析；不 eval，避免网卡名/地址被当成代码执行。
     if [ -n "$_tun_iface" ]; then

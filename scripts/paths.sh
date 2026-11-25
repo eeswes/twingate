@@ -78,3 +78,36 @@ twin_bin_dir() {
         printf '%s\n' "$TWIN_ROOT/dist"
     fi
 }
+
+# 判断一个二进制能不能直接执行：0 = 可以，1 = 文件不存在，2 = 存在但没有执行位。
+# "存在但不可执行"在 /sdcard 这类 noexec 文件系统上很常见，和"没构建"是两回事，
+# 提示必须分开，否则用户会反复重建却毫无作用。
+twin_bin_state() {
+    [ -e "$1" ] || return 1
+    [ -x "$1" ] || return 2
+    return 0
+}
+
+# 把 twin_bin_state 的结果翻译成可操作的提示；失败时写 stderr 并返回同样的码。
+twin_bin_diagnose() {
+    _diag_path=$1
+    _diag_name=${2:-$(basename -- "$1")}
+
+    twin_bin_state "$_diag_path"
+    case $? in
+        0) return 0 ;;
+        1)
+            printf '缺少 %s（%s）。\n' "$_diag_name" "$_diag_path" >&2
+            printf '  请先执行：sh scripts/build.sh\n' >&2
+            return 1
+            ;;
+    esac
+
+    printf '%s 存在，但没有可执行权限：%s\n' "$_diag_name" "$_diag_path" >&2
+    printf '  这说明文件已经编译好了，只是当前文件系统不允许可执行位——\n' >&2
+    printf '  /sdcard 这类外部存储（noexec）就是这样，重新构建也不会改变。\n' >&2
+    printf '  处理办法：把项目放到支持可执行位的目录重新构建（如 Termux 的 $HOME、\n' >&2
+    printf '  容器内的 /data），或者设 TWIN_RUNTIME_DIR 指向一个可执行的目录，\n' >&2
+    printf '  scripts/start.sh 会把二进制复制过去再运行。\n' >&2
+    return 2
+}

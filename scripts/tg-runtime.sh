@@ -125,11 +125,28 @@ twin_render_config() {
 
     for k in TWIN_HTTP_PLAIN TWIN_SOCKS_PLAIN TWIN_FTP_PLAIN TWIN_DNS_SERVER \
              TWIN_EXTERNAL TWIN_LOG_DIR TWIN_PLAIN_BIND \
-             TWIN_HTTP_BIND TWIN_SOCKS_BIND TWIN_FTP_BIND; do
+             TWIN_HTTP_BIND TWIN_SOCKS_BIND TWIN_FTP_BIND TWIN_TIMEOUTS; do
         eval "val=\${$k:-}"
         esc=$(printf '%s' "$val" | sed -e 's/[\/&]/\\&/g')
         sed -i "s|\${$k}|$esc|g" "$OUT"
     done
+
+    # 与 scripts/render-config.sh 同一套校验：11 个正整数，写错就拒绝生成。
+    _tmo_count=0
+    _tmo_bad=0
+    for _t in ${TWIN_TIMEOUTS:-}; do
+        case "$_t" in
+            ''|*[!0-9]*) _tmo_bad=1 ;;
+            *) [ "$_t" -gt 0 ] || _tmo_bad=1 ;;
+        esac
+        _tmo_count=$((_tmo_count + 1))
+    done
+    if [ "$_tmo_bad" = 1 ] || [ "$_tmo_count" -ne 11 ]; then
+        echo "[config] timeouts 需要 11 个正整数，当前是 $_tmo_count 个：${TWIN_TIMEOUTS:-}" >&2
+        echo "[config] 顺序：SINGLEBYTE_S SINGLEBYTE_L STRING_S STRING_L CONNECTION_S CONNECTION_L" >&2
+        echo "[config]       DNS_TO CHAIN_TO CONNECT_TO CONNBACK_TO LINGER_TO" >&2
+        return 1
+    fi
 
     # 上游 SOCKS5 先解析：auth none 下 3proxy 不检查 ACL，parent 也需要 authorizer。
     if command -v twin_parent_resolve >/dev/null 2>&1; then
@@ -366,7 +383,7 @@ twin_start() {
         twin_start_one 3proxy "$RUNTIME_DIR/3proxy" "$TWIN_3PROXY_CFG"
     fi
     if [ "$need_mux" = 1 ]; then
-        export TWIN_MUX_PEEK_MS
+        export TWIN_MUX_PEEK_MS TWIN_MUX_FTP_GRACE_MS
         twin_start_one tgmux "$RUNTIME_DIR/tgmux" \
             "$TWIN_MUX_PLAIN" "$TWIN_HTTP_PLAIN" "$TWIN_SOCKS_PLAIN" \
             "$TWIN_FTP_PLAIN" "$TWIN_MUX_BIND"
@@ -393,6 +410,89 @@ twin_stop() {
     twin_sweep_orphans "$TWIN_RUN_DIR"
 }
 
+# 从运行中的 3proxy.cfg 里取 nserver 与超时，实际测一次解析。
+#
+# 为什么要有这一段：`nserver` 是明文 UDP 53，不走 TUN 绑定，也未必能过上游代理。
+# 配了一个容器里根本到不了的 DNS（典型是 8.8.8.8）时，症状是"第一次好几秒、
+# 之后 2~3 秒"，而且 3proxy 自己不会报错——它只是等满 DNS_TO 再放弃。
+# 这里主动量一下，把"配置值 vs 实测"并排显示出来，一眼能看出是不是它。
+twin_status_dns() {
+    _dns_dir=$1
+    _cfg=""
+    for _c in "$TWIN_3PROXY_CFG" "$_dns_dir/3proxy.cfg"; do
+        [ -f "$_c" ] && { _cfg=$_c; break; }
+    done
+    [ -n "$_cfg" ] || return 0
+    _ns=$(sed -n 's/^nserver[[:space:]]*\([^[:space:]]*\).*/\1/p' "$_cfg" | head -1)
+    _tmo=$(sed -n 's/^timeouts[[:space:]]*//p' "$_cfg" | head -1)
+    [ -n "$_ns" ] || return 0
+    # 第 7 位是 DNS_TO，第 9 位是 CONNECT_TO
+    _dns_to=$(printf '%s\n' "$_tmo" | cut -d' ' -f7)
+    _conn_to=$(printf '%s\n' "$_tmo" | cut -d' ' -f9)
+
+    echo "=== DNS ==="
+    echo "nserver      $_ns（DNS_TO=${_dns_to:-?}s CONNECT_TO=${_conn_to:-?}s）"
+
+    # 去掉 :port，还原成主机名/地址；IPv6 的 [addr]:port 形式也照顾到。
+    _nshost=$_ns
+    case "$_ns" in
+        \[*\]:*) _nshost=${_ns%]:*} ;;      # [::1]:53
+        \[*\])   _nshost=${_ns#\[}; _nshost=${_nshost%\]} ;;
+        *:*:*)   : ;;                        # 裸 IPv6，端口是默认的 53
+        *:*)     _nshost=${_ns%:*} ;;
+    esac
+
+    # 真的发一个 DNS 查询，量往返时间。用 Python 而不是 getent/nslookup：
+    # 后两者走系统解析器、查缓存，量不到 3proxy 那条路径。
+    _py=""
+    for _cand in python3 python; do
+        command -v "$_cand" >/dev/null 2>&1 && { _py=$_cand; break; }
+    done
+    if [ -z "$_py" ]; then
+        echo "（没有 python，跳过解析实测；可用 nslookup 手工验证）"
+        return 0
+    fi
+    "$_py" - "$_nshost" "${_dns_to:-15}" <<'PY' 2>/dev/null || echo "解析实测失败（超时或不可达）"
+import socket, struct, sys, time
+
+host = sys.argv[1]
+dns_to = sys.argv[2]
+port = 53
+if host.startswith("[") and "]:" in host:
+    host, port = host[1:].split("]:")
+port = int(port)
+# 一个最小的 A 查询：example.com
+q = struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+for label in b"example.com".split(b"."):
+    q += bytes([len(label)]) + label
+q += b"\x00" + struct.pack(">HH", 1, 1)
+
+s = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET,
+                  socket.SOCK_DGRAM)
+s.settimeout(6)
+t0 = time.perf_counter()
+try:
+    s.sendto(q, (host, port))
+    s.recvfrom(2048)
+    ms = (time.perf_counter() - t0) * 1000
+    print("实测解析     %.1f ms（example.com，明文 UDP）" % ms)
+except socket.timeout:
+    print("实测解析     超时 >6s —— 这个 DNS 从容器里到不了，")
+    print("             每次新域名都会等满 DNS_TO=" + dns_to + "s 才继续。")
+except OSError as e:
+    print("实测解析     失败：%s" % e)
+PY
+    case "$_dns_to" in
+        ''|*[!0-9]*) ;;
+        *)
+            if [ "$_dns_to" -ge 10 ]; then
+                echo "提示：DNS_TO 是 ${_dns_to}s，一旦解析不到就要干等这么久；"
+                echo "     把它收紧到 5（TWIN_DNS_TO=5），或换成本机可达的 DNS。"
+            fi
+            ;;
+    esac
+}
+
 twin_status() {
     twin_ports_init
     RUNDIR=$TWIN_RUN_DIR
@@ -408,6 +508,7 @@ $TWIN_FTP_TLS $TWIN_FTP_PLAIN $TWIN_MUX_PLAIN $TWIN_MIXED_TLS"
     [ -f "$RUNDIR/services" ] && { echo "=== SERVICES ==="; cat "$RUNDIR/services"; }
     [ -f "$RUNDIR/parent" ] && { echo "=== PARENT ==="; cat "$RUNDIR/parent"; }
     [ -f "$RUNDIR/tun" ] && { echo "=== TUN ==="; cat "$RUNDIR/tun"; }
+    twin_status_dns "$RUNDIR"
 
     echo "=== PID ==="
     for pidfile in "$RUNDIR"/*.pid; do

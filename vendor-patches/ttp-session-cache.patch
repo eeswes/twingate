@@ -1,0 +1,189 @@
+--- a/ttp.c
++++ b/ttp.c
+@@ -573,6 +573,29 @@
+ 	if (!init_certificates())
+ 		goto cleanup_log;
+ 
++	/*
++	 * 会话缓存必须在这里建：下面是 accept 循环，每个连接 fork 一次，
++	 * 只有 fork 之前分配的共享映射才能被子进程共用。
++	 */
++	{
++		size_t cache_kb = 64;
++		const char *cache_env = getenv("TTP_SESSION_CACHE_KB");
++
++		if (cache_env != NULL && *cache_env != '\0') {
++			long v = strtol(cache_env, NULL, 10);
++			if (v >= 0)
++				cache_kb = (v > 8192) ? 8192 : (size_t)v;
++		}
++		if (cache_kb == 0)
++			log_message("TLS session cache disabled by TTP_SESSION_CACHE_KB=0");
++		else if (ssl_init_session_cache(cache_kb * 1024))
++			/* BearSSL 每条会话固定 100 字节。 */
++			log_message("TLS session cache: %zu KiB (%zu sessions)",
++				cache_kb, ssl_session_cache_bytes() / 100);
++		else
++			log_message("TLS session cache disabled, every handshake will be full");
++	}
++
+ 	/* Setup server socket */
+ 	server_sock = setup_server_socket(g_listen_port);
+ 	if (server_sock < 0)
+--- a/bearssl-layer.c
++++ b/bearssl-layer.c
+@@ -15,6 +15,8 @@
+ #include <signal.h>
+ #include <fcntl.h>
+ #include <time.h>
++#include <sched.h>
++#include <sys/mman.h>
+ 
+ #include "bearssl-layer.h"
+ 
+@@ -33,6 +35,123 @@
+ static const br_x509_certificate  *g_ca;
+ static const br_x509_trust_anchor *g_trust_anchor;
+ 
++/* ========================================================================= */
++/* ------------- 共享内存 TLS 会话缓存（TwinGate 本地补丁） ---------------- */
++/* ========================================================================= */
++
++/*
++ * ttp 是 fork-per-connection：一个连接一个子进程，进程内的缓存活不过一次
++ * 握手。要让 TLS 1.2 session ID 复用真正生效，缓存必须跨进程可见，所以把
++ * BearSSL 的 LRU 缓存放在 MAP_SHARED 匿名映射里，父子看到同一份物理页。
++ *
++ * LRU 的链表操作不是原子的（并发写会写坏索引），外面套一把共享内存里的
++ * 自旋锁：临界区只有一次百来字节的 memcpy，几个微秒，自旋等待可以接受，
++ * 也不需要额外链接 pthread。
++ */
++
++/* BearSSL 每条会话固定占 100 字节。 */
++#define TWIN_CACHE_ENTRY 100
++
++typedef struct {
++	const br_ssl_session_cache_class *vtable;   /* 必须是第一个字段 */
++	br_ssl_session_cache_lru          lru;
++	volatile int                      lock;
++} twin_session_cache;
++
++static twin_session_cache *g_cache;
++static size_t              g_cache_bytes;
++
++static void twin_cache_save(const br_ssl_session_cache_class **ctx,
++	br_ssl_server_context *server_ctx,
++	const br_ssl_session_parameters *params);
++static int twin_cache_load(const br_ssl_session_cache_class **ctx,
++	br_ssl_server_context *server_ctx,
++	br_ssl_session_parameters *params);
++
++static const br_ssl_session_cache_class g_cache_vtable = {
++	sizeof(twin_session_cache),
++	twin_cache_save,
++	twin_cache_load
++};
++
++static void cache_lock(twin_session_cache *cc)
++{
++	while (__sync_lock_test_and_set(&cc->lock, 1))
++		sched_yield();
++}
++
++static void cache_unlock(twin_session_cache *cc)
++{
++	__sync_lock_release(&cc->lock);
++}
++
++/*
++ * 注意：ctx 指向结构体首字段，而 LRU 自己的 vtable 在结构体内部，所以
++ * 转交给 BearSSL 时要把 &cc->lru.vtable 作为它的 ctx 传进去。
++ */
++static void twin_cache_save(const br_ssl_session_cache_class **ctx,
++	br_ssl_server_context *server_ctx,
++	const br_ssl_session_parameters *params)
++{
++	twin_session_cache *cc = (twin_session_cache *)ctx;
++
++	cache_lock(cc);
++	cc->lru.vtable->save((const br_ssl_session_cache_class **)&cc->lru.vtable,
++		server_ctx, params);
++	cache_unlock(cc);
++}
++
++static int twin_cache_load(const br_ssl_session_cache_class **ctx,
++	br_ssl_server_context *server_ctx,
++	br_ssl_session_parameters *params)
++{
++	twin_session_cache *cc = (twin_session_cache *)ctx;
++	int ret;
++
++	cache_lock(cc);
++	ret = cc->lru.vtable->load(
++		(const br_ssl_session_cache_class **)&cc->lru.vtable,
++		server_ctx, params);
++	cache_unlock(cc);
++	return ret;
++}
++
++/**
++ * @brief 分配并初始化共享内存会话缓存。必须在 fork 之前调用。
++ *
++ * @param bytes 可用的条目存储字节数（每条 100 字节）。
++ *
++ * @return 1 成功，0 失败（失败时 ttp 仍可工作，只是每次全握手）。
++ */
++int ssl_init_session_cache(size_t bytes)
++{
++	size_t hdr = (sizeof(twin_session_cache) + 15) & ~(size_t)15;
++	void *p;
++
++	if (bytes < TWIN_CACHE_ENTRY * 2)
++		bytes = TWIN_CACHE_ENTRY * 2;
++
++	p = mmap(NULL, hdr + bytes, PROT_READ | PROT_WRITE,
++		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++	if (p == MAP_FAILED) {
++		log_message("Session cache mmap failed: %s", strerror(errno));
++		return 0;
++	}
++
++	memset(p, 0, hdr);
++	g_cache = p;
++	g_cache->vtable = &g_cache_vtable;
++	br_ssl_session_cache_lru_init(&g_cache->lru,
++		(unsigned char *)p + hdr, bytes);
++	g_cache_bytes = bytes;
++	return 1;
++}
++
++size_t ssl_session_cache_bytes(void)
++{
++	return g_cache_bytes;
++}
++
+ /**
+  * @brief Provided an RSA key, do a full copy (on heap) and save it
+  * in @p d_pk.
+@@ -617,6 +736,10 @@
+     br_ssl_engine_set_buffer(&ctx->sc.eng, ctx->iobuf, sizeof ctx->iobuf, 1);
+     /* Reset server context for new handshake */
+     br_ssl_server_reset(&ctx->sc);
++    /* === Session Resumption === */
++    /* 共享缓存由 main 在 fork 前建好；没有就退化成每次全握手。 */
++    if (g_cache != NULL)
++        br_ssl_server_set_cache(&ctx->sc, &g_cache->vtable);
+     /* Initialize BearSSL I/O with socket callbacks */
+     br_sslio_init(&ctx->ioc, &ctx->sc.eng, sock_read, ctx, sock_write, ctx);
+     return 1;
+--- a/bearssl-layer.h
++++ b/bearssl-layer.h
+@@ -61,6 +61,8 @@
+ 	int ssl_init_server_private_key(const uint8_t *pk_buf, size_t len);
+ 	int ssl_init_server_certificate_chain(const uint8_t *chain, size_t len);
+ 	int ssl_init_server_certificate_authority(const uint8_t *ca_buf, size_t len);
++	int ssl_init_session_cache(size_t bytes);
++	size_t ssl_session_cache_bytes(void);
+ 	int ssl_init_server_context(struct ssl_server_context *ctx, int chacha_only);
+ 	int ssl_read(struct ssl_server_context *ctx, void *dest, size_t len);
+ 	int ssl_write_all(struct ssl_server_context *ctx, void *src, size_t len);

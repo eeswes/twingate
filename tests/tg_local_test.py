@@ -238,6 +238,31 @@ def proxy_socket(port, tls, cafile):
     return s
 
 
+def tls_resume(port, cafile):
+    """连续两次握手，第二次带上第一次的 session。
+
+    返回 (first_reused, second_reused)。ttp 只开 TLS 1.2，所以客户端也要
+    把上限压到 1.2，否则 OpenSSL 会先谈 1.3 再失败。
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.load_verify_locations(cafile=cafile)
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+
+    s1 = ctx.wrap_socket(socket.create_connection(("127.0.0.1", port), 5),
+                         server_hostname="localhost")
+    sess = s1.session
+    first = bool(s1.session_reused)
+    s1.close()
+
+    s2 = ctx.wrap_socket(socket.create_connection(("127.0.0.1", port), 5),
+                         server_hostname="localhost", session=sess)
+    second = bool(s2.session_reused)
+    s2.close()
+    return first, second
+
+
 def basic(port, user, password):
     if user is None:
         return ""
@@ -580,6 +605,83 @@ def test_tui_env(res, root, tmp):
     res.check("关闭 tui.env 后端口仍按环境变量渲染", "proxy -p31808" in text)
 
 
+def test_timeouts(res, root, tmp):
+    """timeouts 的渲染与校验。
+
+    3proxy 对 timeouts 是静默截断的：少写一个数就少一个超时、多写一个被忽略，
+    写错位置会让 CONNECT_TO 变成别的值。配置层必须先把这两类错误拦下来。
+    """
+    def render(name, extra):
+        out = os.path.join(tmp, name)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("TWIN_", "TG_"))}
+        env.update({
+            "TWIN_TUI_ENV": os.path.join(tmp, "no-such-tui.env"),
+            "TWIN_LOG_DIR": os.path.join(tmp, "tmo-logs"),
+            "TWIN_CONFIG_PATH": out,
+        })
+        env.update(extra)
+        p = subprocess.run(["sh", os.path.join(root, "scripts/render-config.sh"), out],
+                           cwd=root, env=env, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT)
+        text = ""
+        if os.path.exists(out):
+            with open(out, encoding="utf-8") as f:
+                text = f.read()
+        return p.returncode, text, p.stdout.decode("utf-8", "replace")
+
+    rc, text, _ = render("tmo-default.cfg", {})
+    res.check("timeouts 默认与 3proxy 自带一致",
+              rc == 0 and "timeouts 1 5 30 60 180 1800 15 60 15 5 5" in text)
+
+    rc, text, _ = render("tmo-custom.cfg", {"TWIN_TIMEOUTS": "1 5 30 60 180 1800 5 60 45 5 5"})
+    res.check("timeouts 按 TWIN_TIMEOUTS 整体渲染",
+              rc == 0 and "timeouts 1 5 30 60 180 1800 5 60 45 5 5" in text)
+
+    rc, text, _ = render("tmo-one.cfg", {"TWIN_CONNECT_TO": "40"})
+    res.check("单项 TWIN_CONNECT_TO 只改第 9 位",
+              rc == 0 and "timeouts 1 5 30 60 180 1800 15 60 40 5 5" in text)
+
+    rc, _, out = render("tmo-short.cfg", {"TWIN_TIMEOUTS": "1 5 30 60 180 1800 15 60 15 5"})
+    res.check("timeouts 少一位被拒绝", rc != 0 and "11 个正整数" in out)
+
+    rc, _, out = render("tmo-bad.cfg", {"TWIN_TIMEOUTS": "1 5 30 60 180 1800 15 60 abc 5 5"})
+    res.check("timeouts 非数字被拒绝", rc != 0 and "11 个正整数" in out)
+
+
+def test_tui_timeout_menu(res, root, tmp):
+    """超时菜单：改 CONNECT_TO 只动那一位，恢复默认能回到出厂值。"""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("TWIN_", "TG_"))}
+    tui = os.path.join(tmp, "tmo-menu.env")
+    with open(tui, "w", encoding="utf-8") as f:
+        f.write("TWIN_TIMEOUTS='1 5 30 60 180 1800 15 60 12 5 5'\n")
+    env.update({
+        "TWIN_TUI_ENV": tui,
+        "TWIN_LOG_DIR": os.path.join(tmp, "tmo-menu-logs"),
+        "TWIN_UI_LANG": "zh",
+    })
+
+    def run(payload):
+        p = subprocess.run(["sh", os.path.join(root, "tgmenu.sh")], cwd=root,
+                           input=payload.encode(), stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, env=env)
+        return p.stdout.decode("utf-8", "replace")
+
+    # 配置菜单 12 -> 超时设置 1 -> 连目标超时改 30 -> 返回
+    out = run("5\n12\n1\n30\n\n0\n0\n0\n")
+    with open(tui, encoding="utf-8") as f:
+        saved = f.read()
+    res.check("超时菜单改连目标超时只动第 9 位",
+              "TWIN_TIMEOUTS='1 5 30 60 180 1800 15 60 30 5 5'" in saved,
+              saved[-200:])
+
+    out = run("5\n12\n4\n\n0\n0\n0\n")
+    with open(tui, encoding="utf-8") as f:
+        saved = f.read()
+    res.check("超时菜单可恢复默认",
+              "TWIN_TIMEOUTS='1 5 30 60 180 1800 15 60 15 5 5'" in saved,
+              saved[-200:])
+
+
 def test_tui_tun_menu(res, root, tmp):
     """TUN 子菜单的输入约定：回车返回、直接敲网卡名也认、纯数字给提示。"""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("TWIN_", "TG_"))}
@@ -822,6 +924,28 @@ def test_certs(res, root, cert_dir):
         res.check("Python 可加载 CA 与证书链", False, repr(exc))
 
 
+def test_vendor_patch(res, root):
+    """vendor/ 不入库，对上游的本地修改必须落在 vendor-patches/ 并能被重建。
+
+    构建脚本会在编译前幂等应用补丁；这里确认补丁文件和实际源码是一致的，
+    防止「改了 vendor 却忘了存补丁」——那样重新 make vendor 就会静默回退。
+    """
+    src = os.path.join(root, "vendor", "ttp", "ttp.c")
+    if not os.path.exists(src):
+        return  # 未拉取 vendor 的环境（例如只跑配置渲染）不做断言
+    with open(src, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    patched = "set_tcp_nodelay" in text
+    res.check("ttp 已应用 TCP_NODELAY 补丁", patched,
+              "vendor/ttp/ttp.c 含 set_tcp_nodelay()" if patched
+              else "缺少补丁；sh scripts/build.sh 会自动应用")
+    patch_file = os.path.join(root, "vendor-patches", "ttp-nodelay.patch")
+    has_patch = os.path.exists(patch_file)
+    res.check("ttp 补丁文件随仓库保留", has_patch,
+              "vendor-patches/ttp-nodelay.patch" if has_patch
+              else "缺少补丁文件，重新拉取 vendor 后改动会丢失")
+
+
 def test_install_dirs(res, root, tmp):
     """install.sh 的 --config-dir / --data-dir 必须写进启动器，运行时真的用它们。"""
     inst = os.path.join(tmp, "inst dir")          # 带空格，顺带验证引号处理
@@ -894,8 +1018,11 @@ def main():
         test_parent_config(res, root, tmp)
         test_tun_config(res, root, tmp)
         test_tui_env(res, root, tmp)
+        test_timeouts(res, root, tmp)
         test_tui_tun_menu(res, root, tmp)
+        test_tui_timeout_menu(res, root, tmp)
         test_install_dirs(res, root, tmp)
+        test_vendor_patch(res, root)
         test_certs(res, root, cert_dir)
         if not os.path.exists(os.path.join(cert_dir, "ttp.env")):
             print("证书不可用，终止后续网络测试", flush=True)
@@ -949,6 +1076,11 @@ def main():
         ok, data = http_via(ht, origin_port, True, ca, password="wrongpass")
         res.check("HTTP-TLS 错误密码被拒绝", not ok, data[:120])
 
+        first, second = tls_resume(ht, ca)
+        res.check("TLS 会话复用生效（免掉第二次完整握手）",
+                  (not first) and second,
+                  "first_reused=%s second_reused=%s" % (first, second))
+
         stop(base_env)
 
         # 上游 SOCKS5（parent 链式出口）：预留 4 个端口
@@ -970,6 +1102,16 @@ def main():
             res.check(tag + " SOCKS5", ok, data[:120])
             ok, data = ftp_banner(port, tls, ca)
             res.check(tag + " FTP 220", ok, data[:120])
+
+        # tgmux 的 banner 竞速：沉默连接不该再盲等 500ms 才拿到 220。
+        t0 = time.perf_counter()
+        s = socket.create_connection(("127.0.0.1", mp), 5)
+        banner = s.recv(64)
+        dt = time.perf_counter() - t0
+        s.close()
+        res.check("mixed-plain FTP 首包不再等 500ms",
+                  banner.startswith(b"220") and dt < 0.45,
+                  "%.0f ms, %r" % (dt * 1000, banner[:20]))
         stop(mixed_env)
     finally:
         for env in (base_env, mixed_env):
