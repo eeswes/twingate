@@ -7,7 +7,7 @@
 #   ~/.local/lib/twingate/ttp
 #   ~/.local/lib/twingate/tgmux
 #   ~/.local/lib/twingate/tgtun
-#   ~/.local/config/twingate/          tui.env / 3proxy.cfg 等配置
+#   ~/.config/twingate/                tui.env / 3proxy.cfg 等配置（XDG 配置目录）
 #   ~/.local/share/twingate/           certs / logs / run 等运行时数据
 #
 # 用法：sh scripts/install.sh [选项]
@@ -60,11 +60,48 @@ else
 fi
 [ -n "$PREFIX" ] || { printf '[install] 未确定安装前缀\n' >&2; exit 1; }
 
+# 相对路径的 --prefix/--config-dir/--data-dir 会原样写进启动器与提示，运行时按
+# "当时的 cwd" 解析——和安装时看到的目录根本不是同一个（证书、日志会跑到别处）。
+# 这里统一转成绝对路径。用词法解析而不是 `cd && pwd`：目录此刻可能还不存在
+# （下面才 mkdir），靠 cd 失败退回原值等于这个 bug 白修。
+abs_dir() {
+    case "$1" in
+        /*) _p=$1 ;;
+        *)  _p=$PWD/$1 ;;
+    esac
+    _o=
+    _oldifs=$IFS; IFS=/
+    for _s in $_p; do
+        case "$_s" in
+            ''|.) ;;
+            ..)   _o=${_o%/*} ;;
+            *)    _o=$_o/$_s ;;
+        esac
+    done
+    IFS=$_oldifs
+    printf '%s' "${_o:-/}"
+}
+PREFIX=$(abs_dir "$PREFIX")
+
 LIBDIR="$PREFIX/lib/twingate"
 BINDIR="$PREFIX/bin"
 LAUNCHER="$BINDIR/twingate"
-CONFIG_DIR=${CONFIG_ARG:-${TWIN_CONFIG_DIR:-${HOME:-/tmp}/.local/config/twingate}}
-DATA_DIR=${DATA_ARG:-${TWIN_DATA_DIR:-${HOME:-/tmp}/.local/share/twingate}}
+CONFIG_DIR=${CONFIG_ARG:-${TWIN_CONFIG_DIR:-}}
+DATA_DIR=${DATA_ARG:-${TWIN_DATA_DIR:-}}
+# XDG 默认位置：配置 ~/.config/twingate、数据 ~/.local/share/twingate。
+# 旧版把配置放在 ~/.local/config/twingate（那不是 XDG 目录），下面会做一次迁移。
+if [ -z "$CONFIG_DIR" ]; then
+    _xdg=${XDG_CONFIG_HOME:-}
+    case "$_xdg" in /*) ;; *) _xdg=${HOME:-/tmp}/.config ;; esac
+    CONFIG_DIR=$_xdg/twingate
+fi
+if [ -z "$DATA_DIR" ]; then
+    _xdg=${XDG_DATA_HOME:-}
+    case "$_xdg" in /*) ;; *) _xdg=${HOME:-/tmp}/.local/share ;; esac
+    DATA_DIR=$_xdg/twingate
+fi
+CONFIG_DIR=$(abs_dir "$CONFIG_DIR")
+DATA_DIR=$(abs_dir "$DATA_DIR")
 
 printf '[install] 命令    : %s\n' "$LAUNCHER"
 printf '[install] 程序目录: %s （仅二进制）\n' "$LIBDIR"
@@ -84,10 +121,35 @@ for d in "$BINDIR" "$LIBDIR"; do
         exit 1
     }
 done
+
+# --config-dir / --data-dir 已在上方转成绝对路径（见 abs_dir）。
 if [ -e "$LAUNCHER" ] && [ "$FORCE" != 1 ]; then
     printf '[install] 已存在 %s；如要覆盖请加 --force。\n' "$LAUNCHER" >&2
     exit 1
 fi
+
+# ---------------- 配置文件迁移 ----------------
+# 旧版把配置写在 ~/.local/config/twingate（不是 XDG 目录）。重新安装时把那份
+# tui.env 带过来，否则用户装完会发现"设置全没了"。旧文件保留，由用户自己删。
+_old_cfg=${HOME:-/tmp}/.local/config/twingate
+if [ "$_old_cfg" != "$CONFIG_DIR" ] && [ -f "$_old_cfg/tui.env" ] \
+        && [ ! -f "$CONFIG_DIR/tui.env" ]; then
+    if cp "$_old_cfg/tui.env" "$CONFIG_DIR/tui.env" 2>/dev/null; then
+        chmod 600 "$CONFIG_DIR/tui.env" 2>/dev/null || :
+        printf '[install] 已迁移旧配置：%s -> %s\n' "$_old_cfg/tui.env" "$CONFIG_DIR/tui.env"
+        printf '[install] 旧文件保留在 %s，确认无误后可自行删除。\n' "$_old_cfg"
+    fi
+fi
+
+# 源码树里的 config/tui.env 是"当前这份配置"，安装后新位置没有就带过去：
+# 它不在仓库以外任何地方，不复制等于让用户重新配一遍。tui.env 含密码，权限 600。
+if [ -f "$ROOT/config/tui.env" ] && [ ! -f "$CONFIG_DIR/tui.env" ]; then
+    if cp "$ROOT/config/tui.env" "$CONFIG_DIR/tui.env" 2>/dev/null; then
+        chmod 600 "$CONFIG_DIR/tui.env" 2>/dev/null || :
+        printf '[install] 已复制现有配置：%s\n' "$CONFIG_DIR/tui.env"
+    fi
+fi
+
 for bin in 3proxy ttp; do
     [ -f "$ROOT/dist/$bin" ] || {
         printf '[install] 缺少 dist/%s，请先执行 scripts/build.sh。\n' "$bin" >&2
@@ -154,6 +216,13 @@ sq() {
     strip_shebang "$ROOT/scripts/lifecycle.sh"
     printf '\n'
     strip_shebang "$ROOT/scripts/tun.sh"
+    printf '\n'
+    # 证书生成/补齐（twin_gen_certs / twin_cert_ensure）同样只有一份实现。
+    strip_shebang "$ROOT/scripts/cert.sh"
+    printf '\n'
+    # status.sh 必须在 tg-runtime.sh 之前：安装模式没有 scripts/ 目录，
+    # twin_status 调用的 twin_status_report 只能来自这里内嵌的一份。
+    strip_shebang "$ROOT/scripts/status.sh"
     printf '\n'
     strip_shebang "$ROOT/scripts/tg-runtime.sh"
     printf '\n'

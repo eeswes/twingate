@@ -125,8 +125,12 @@ done
 
 echo "[build] ttp (BearSSL)"
 # ttp 的 TCP_NODELAY 等本地修改以补丁形式保存，vendor/ 每次拉取都是干净的上游。
+# 补丁没打对就没有 TCP_NODELAY / 会话复用，编出来的二进制"能用但慢"，所以这里直接中止。
 . "$ROOT/scripts/vendor-patch.sh"
-twin_vendor_patch_all "$ROOT"
+twin_vendor_patch_all "$ROOT" || {
+    echo "[build] 补丁校验未通过，已中止。修好后再构建（见上面的提示）。" >&2
+    exit 1
+}
 cd "$ROOT/vendor/ttp"
 make clean >/dev/null 2>&1 || true
 make -j"$JOBS" CC="$CC_CMD" LDFLAGS="$TTP_LDFLAGS"

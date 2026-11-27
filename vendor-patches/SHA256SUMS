@@ -1,0 +1,4 @@
+dccb158f541c3bc596de9082bdabd08a9ebbb637c6c29733f4819729d2fabedb  ./ttp-nodelay.patch
+4e1ea27f9b46abe2c6f7a309b039bd6f5c26b428236e2e0f4f70b53cd32c611a  ./ttp-session-cache.patch
+2c11a2a55cfb811637ab7112d2851e4ae023a7a0d80fbf156d6d88539339f5aa  ./ttp-nodelay.expect
+19c6c3feb7e6e2faa1d61e1521aa4a0a0876def1b7e82c1f9118343a477d4bcf  ./ttp-session-cache.expect

@@ -3,10 +3,11 @@
 #
 # 安装模式（命令名为 twingate，位于 <prefix>/bin）：
 #   TWIN_ROOT          <prefix>/lib/twingate —— 只放 3proxy / ttp / tgmux / tgtun 四个二进制
-#   TWIN_CONFIG_DIR    ~/.local/config/twingate —— tui.env / 3proxy.cfg
-#                      （install.sh --config-dir 可改，会写进启动器）
+#   TWIN_CONFIG_DIR    ~/.config/twingate —— tui.env / 3proxy.cfg
+#                      （XDG_CONFIG_HOME 为绝对路径时以它为准；install.sh --config-dir 可改，
+#                        会写进启动器。旧版曾用 ~/.local/config/twingate，install.sh 会自动迁移）
 #   TWIN_DATA          ~/.local/share/twingate —— certs / logs / run
-#                      （install.sh --data-dir 可改）
+#                      （XDG_DATA_HOME 同理；install.sh --data-dir 可改）
 #
 # 源码树模式（sh scripts/xxx.sh 或 sh tgmenu.sh）：
 #   TWIN_ROOT          项目根目录
@@ -21,6 +22,16 @@
 # 注意：$TWIN_ROOT 在两种模式下含义不同（安装模式=二进制目录，源码树=项目根目录），
 # 所以取二进制一律用 twin_bin_dir，不要自己拼 $TWIN_ROOT/<程序名>。
 
+# XDG 规范：这两个变量只有在是绝对路径时才有效，相对路径必须忽略、退回默认。
+# 打印默认目录（不含具体项目名子目录）。
+twin_xdg_base() {
+    eval "_xdg_val=\${$1:-}"
+    case "$_xdg_val" in
+        /*) printf '%s' "$_xdg_val" ;;
+        *)  printf '%s' "$2" ;;
+    esac
+}
+
 twin_init_paths() {
     _self=${1:-$0}
     _here=$(CDPATH= cd -- "$(dirname -- "$_self")" 2>/dev/null && pwd) || _here=.
@@ -32,9 +43,10 @@ twin_init_paths() {
         TWIN_PREFIX=$(CDPATH= cd -- "$_here/.." && pwd)
         TWIN_ROOT="$TWIN_PREFIX/lib/twingate"
         # 安装时由 install.sh 写进启动器的 TWIN_DEFAULT_* 优先；
-        # 没有（例如手工拷进 <prefix>/bin）才退回 ~/.local 默认值。
-        TWIN_CONFIG_DIR=${TWIN_CONFIG_DIR:-${TWIN_DEFAULT_CONFIG_DIR:-${HOME:-/tmp}/.local/config/twingate}}
-        TWIN_DATA=${TWIN_DATA:-${TWIN_DEFAULT_DATA_DIR:-${HOME:-/tmp}/.local/share/twingate}}
+        # 没有（例如手工拷进 <prefix>/bin）才退回 XDG 默认值。
+        # 注意是 ~/.config 而不是 ~/.local/config：后者不是 XDG 目录，旧版写错了。
+        TWIN_CONFIG_DIR=${TWIN_CONFIG_DIR:-${TWIN_DEFAULT_CONFIG_DIR:-$(twin_xdg_base XDG_CONFIG_HOME "${HOME:-/tmp}/.config")/twingate}}
+        TWIN_DATA=${TWIN_DATA:-${TWIN_DEFAULT_DATA_DIR:-$(twin_xdg_base XDG_DATA_HOME "${HOME:-/tmp}/.local/share")/twingate}}
     else
         TWIN_INSTALLED=0
         if [ -n "${TWIN_ROOT:-}" ]; then

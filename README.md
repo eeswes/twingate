@@ -51,6 +51,16 @@ TWIN_MIXED=1 sh scripts/start.sh
 python3 tests/tg_probe.py --mixed --mode all --target example.com
 ```
 
+### 不需要 FTP 时把这一路关掉
+
+`TWIN_MIXED_FTP=0` 让混合端口只分 HTTP / SOCKS：`ftppr` 不再监听、配置里连 `ftp` 段都不生成，`tgmux` 也不会去连它。沉默的客户端（浏览器的 preconnect）等够 `TWIN_MUX_FTP_GRACE_MS` 就直接交给 HTTP，跳过整个 220 横幅竞速。
+
+```sh
+TWIN_SERVICES=mixed-tls,mixed-plain TWIN_MIXED_FTP=0 sh scripts/start.sh
+```
+
+TUI 在「配置 → 13) 混合端口 FTP」里也能切。代价是这台端口上**没有 FTP 了**：FTP 客户端连过来拿不到 `220`，会被当成 HTTP。只在偶尔用一次 FTP 的机器上建议开；`twingate status` 的 `=== SERVICES ===` 会标一行 `mixed-ftp: off`。
+
 ### 自定义开放哪些端口
 
 `TWIN_SERVICES` 是逗号分隔的服务清单，决定实际启动哪些监听端口。可选值：
@@ -201,6 +211,8 @@ sh tgmenu.sh
 
 `scripts/gen-certs.sh` 会生成**本地 CA + 服务器证书链**，源码树模式下在 `run/certs/`，安装为单命令后改在 `~/.local/share/twingate/certs/`；SAN 自动包含 `localhost`、`127.0.0.1` 以及生成时在机器上检测到的所有 IPv4 地址。客户端只需要导入一张 `ca.crt`，之后连接 TLS 端口不再需要 `--insecure`。
 
+**没生成证书也能直接启动**：`start` 发现没有证书会就地补一张，并打印提醒。这张证书是刚签的，客户端不信任，所以经 `https://` 代理访问时要跳过校验——`curl` 用 `--proxy-insecure`（注意 `-k` 只管目标站，管不到 `https://` 代理），浏览器/Electron 加 `--ignore-certificate-errors`。想让客户端正常校验，随后执行 `twingate certs` + `twingate trust` 即可。
+
 ```sh
 sh scripts/gen-certs.sh                  # 生成/更新，CA 会复用
 sh scripts/install-ca.sh                 # Linux/Termux/macOS/Windows 自动安装
@@ -231,7 +243,10 @@ TLS 握手收尾是 6 字节的 CCS 紧跟 45 字节的 Finished。对端若走 
 
 实测（docker0、30 次连续连接）：完整握手约 3.0ms，复用后 **0.74ms**；缓存关闭时 30 次全是完整握手。24 线程并发握手没有失败，锁没有把索引写坏。
 
-缓存大小由 `TTP_SESSION_CACHE_KB` 控制（默认 64，约 650 条会话；`0` 关闭）。容器内存很紧时可以调小，缓存不够只是复用率下降，不影响正确性。
+缓存大小由 `TTP_SESSION_CACHE_KB` 控制（**默认 256**，约 2600 条会话；`0` 关闭，上限 8192 即 8MB）。
+TUI 里是「配置 → 14) TLS 会话缓存」，也可以直接写环境变量。每条会话固定 100 字节，所以
+256KB 只是常驻内存里的 256KB 共享页，和 3proxy 每连接 64KB 的转发缓冲比微不足道；
+容器内存实在紧时调小，缓存不够只是复用率下降，不影响正确性。
 
 ### 超时：为什么"有时候能连、有时候隧道失败"
 
@@ -285,7 +300,15 @@ TLS 握手收尾是 6 字节的 CCS 紧跟 45 字节的 Finished。对端若走 
 
 ## 目录
 
-`vendor/` 不入库，对上游的修改保存在 `vendor-patches/`：`ttp-nodelay.patch` 与 `ttp-session-cache.patch`。`fetch-vendor.sh` 与 `build.sh` 会在编译前按顺序幂等应用，重新拉取上游不会丢改动；缺少 `patch` 命令时构建会明确报错，而不是静默退化成慢版本。**改 vendor 里的文件时必须同时更新对应补丁，否则下次 `make vendor` 就白改了。**
+`vendor/` 不入库，对上游的修改保存在 `vendor-patches/`：`ttp-nodelay.patch` 与 `ttp-session-cache.patch`。`fetch-vendor.sh` 与 `build.sh` 会在编译前按顺序幂等应用，重新拉取上游不会丢改动。**改 vendor 里的文件时必须同时更新对应补丁，否则下次 `make vendor` 就白改了。**
+
+补丁不是"命令没报错就算打上了"，有三层校验，任何一层不过都会中止构建：
+
+1. **完整性** — `vendor-patches/SHA256SUMS` 固定补丁文件的内容哈希，被截断或手工改过会直接报错（改了补丁就重新生成：`sh scripts/vendor-patch.sh`）；
+2. **双向确认** — 反向 `patch --dry-run` 必须成功（源码里确实有补丁内容），正向 dry-run 必须失败（否则说明还能再打一遍，即上次没真正落盘）；
+3. **期望特征** — `<补丁>.expect` 列出打完必须出现的代码（例如 `ttp.c:cache_kb = 256`），逐个 `grep -F` 核对，防止"补丁进了一半"。
+
+补丁打不上时会打印每个文件的匹配情况（`已含补丁` / `未打补丁` / `部分匹配`）。跨文件的补丁（`ttp-session-cache` 改 3 个文件）只还原其中一个就会变成半打状态，修复办法是 `git -C vendor/ttp checkout -- .` 后重新构建。
 
 ## 目录
 
@@ -294,7 +317,8 @@ TLS 握手收尾是 6 字节的 CCS 紧跟 45 字节的 Finished。对端若走 
 - `scripts/build.sh` — 构建，产物在 `dist/`（`3proxy`, `ttp`, `tgmux`, `tgtun`）
 - `src/tgmux.c` — 单端口混合模式的协议分发器
 - `src/tgtun.c` — TUN 网卡探测与出站绑定决策（`dist/tgtun`）
-- `scripts/gen-certs.sh` — 生成本地 CA + 服务器证书链 + `run/certs/ttp.env`
+- `scripts/gen-certs.sh` — 生成本地 CA + 服务器证书链 + `run/certs/ttp.env` 的命令行入口
+- `scripts/cert.sh` — 证书生成与"缺了就补一张"的唯一实现（安装时内嵌进 `twingate`）
 - `scripts/install-ca.sh` — 把 `ca.crt` 安装进当前系统信任库
 - `scripts/render-config.sh` — 由模板生成 `run/3proxy.cfg`（含认证开关与上游 parent）
 - `scripts/start.sh` / `stop.sh` / `status.sh` — 进程管理
@@ -322,7 +346,7 @@ TLS 握手收尾是 6 字节的 CCS 紧跟 45 字节的 Finished。对端若走 
 | --- | --- |
 | 命令 | `~/.local/bin/twingate` |
 | 程序（仅二进制） | `~/.local/lib/twingate/` |
-| 配置（`tui.env`、`3proxy.cfg`） | `~/.local/config/twingate/` |
+| 配置（`tui.env`、`3proxy.cfg`） | `~/.config/twingate/`（旧版的 `~/.local/config/twingate/` 会在重新安装时自动迁移） |
 | 数据（证书、日志、PID） | `~/.local/share/twingate/` |
 
 ```sh
@@ -354,9 +378,9 @@ twingate trust        # 把 ca.crt 导入本机信任库
 twingate help         # 查看全部子命令
 ```
 
-完整子命令：`start` / `stop` / `restart` / `status` / `config` / `build` / `certs` / `trust` / `probe` / `selftest` / `install` / `uninstall` / `help` / `version`。其中 `build`、`probe`、`selftest`、`install`、`uninstall` 需要在源码树运行（`twingate` 会给出提示），因为安装形态只携带二进制。环境变量覆盖照常生效，例如 `TWIN_AUTH=0 twingate start`。
+完整子命令：`start` / `stop` / `restart` / `status` / `config` / `build` / `certs` / `trust` / `probe` / `selftest` / `install` / `uninstall` / `help` / `version`。其中 `build`、`probe`、`selftest`、`install` 需要在源码树运行（`twingate` 会给出提示），因为安装形态只携带二进制。环境变量覆盖照常生效，例如 `TWIN_AUTH=0 twingate start`。
 
-卸载保留配置与数据：`make uninstall`；连配置和数据一起删：`sh scripts/uninstall.sh --purge`。
+卸载可以直接用安装好的命令，不必回源码树：`twingate uninstall` 会先停进程，再删启动器与 `lib/twingate` 下的二进制，配置与数据（含证书）保留；`twingate uninstall --purge` 连它们一起删。源码树里对应的是 `make uninstall` / `sh scripts/uninstall.sh --purge`。
 
 > Android/ReDroid 容器里安装后，仍**必须以 root 运行** `twingate start`（`adb shell` 后 `su`，或 Termux 里先 `su`），原因见下文。
 

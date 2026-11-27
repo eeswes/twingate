@@ -10,6 +10,22 @@
 # 安装模式：scripts/install.sh 把本文件内嵌进单文件 twingate。
 # 依赖 twin_init_paths 已执行；所有函数都接受显式传入的 run 目录，便于测试。
 
+# pid 会被系统复用：上一条记录的进程早死了，同一个 pid 可能已经属于别的程序，
+# 这时 kill -0 依然成功，pid 文件看起来"还活着"，于是 start 被永久拒绝。
+# 能读到 /proc/<pid>/cmdline 就核对一下是不是我们的程序；读不到（无 /proc）按活着算。
+twin_pid_is_ours() {
+    _pp=$1
+    _pname=$2
+    [ -r "/proc/$_pp/cmdline" ] || return 0
+    case "$_pname" in
+        3proxy) _ppat=3proxy ;;
+        tgmux)  _ppat=tgmux ;;
+        ttp*)   _ppat=ttp ;;
+        *)      return 0 ;;
+    esac
+    tr '\0' ' ' < "/proc/$_pp/cmdline" 2>/dev/null | grep -q -- "$_ppat"
+}
+
 # 仍存活的 pid 文件记录：每行 "name pid"。
 twin_alive_pids() {
     _rd=${1:-${TWIN_RUN_DIR:-}}
@@ -19,6 +35,7 @@ twin_alive_pids() {
         _p=$(cat "$_pf" 2>/dev/null || true)
         [ -n "$_p" ] || continue
         kill -0 "$_p" 2>/dev/null || continue
+        twin_pid_is_ours "$_p" "$(basename "$_pf" .pid)" || continue
         printf '%s %s\n' "$(basename "$_pf" .pid)" "$_p"
     done
 }
@@ -30,7 +47,8 @@ twin_prune_stale_pids() {
     for _pf in "$_rd"/*.pid; do
         [ -f "$_pf" ] || continue
         _p=$(cat "$_pf" 2>/dev/null || true)
-        if [ -z "$_p" ] || ! kill -0 "$_p" 2>/dev/null; then
+        if [ -z "$_p" ] || ! kill -0 "$_p" 2>/dev/null || \
+           ! twin_pid_is_ours "$_p" "$(basename "$_pf" .pid)"; then
             rm -f "$_pf" 2>/dev/null || :
         fi
     done

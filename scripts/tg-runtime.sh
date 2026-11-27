@@ -29,6 +29,13 @@ if ! command -v twin_tun_resolve >/dev/null 2>&1; then
     fi
 fi
 
+# 证书生成/缺失补齐（scripts/cert.sh）：同样是源码树加载 + 安装模式内嵌。
+if ! command -v twin_gen_certs >/dev/null 2>&1; then
+    if [ -n "${TWIN_ROOT:-}" ] && [ -f "$TWIN_ROOT/scripts/cert.sh" ]; then
+        . "$TWIN_ROOT/scripts/cert.sh"
+    fi
+fi
+
 # ---------------------------------------------------------------- 配置加载
 
 # 注意：本文件在安装模式下会被内嵌进单文件 twingate，所以这里的加载器
@@ -276,8 +283,15 @@ twin_start() {
        twin_has_svc mixed-tls || twin_has_svc mixed-plain; then need_http=1; fi
     if twin_has_svc socks-tls || twin_has_svc socks-plain || \
        twin_has_svc mixed-tls || twin_has_svc mixed-plain; then need_socks=1; fi
-    if twin_has_svc ftp-tls || twin_has_svc ftp-plain || \
-       twin_has_svc mixed-tls || twin_has_svc mixed-plain; then need_ftp=1; fi
+    # TWIN_MIXED_FTP=0：混合端口不带 FTP，ftppr 不监听、tgmux 只分 HTTP/SOCKS。
+    case "${TWIN_MIXED_FTP:-1}" in
+        0|off|no|false) mixed_ftp=0 ;;
+        *)              mixed_ftp=1 ;;
+    esac
+    if twin_has_svc ftp-tls || twin_has_svc ftp-plain; then need_ftp=1; fi
+    if [ "$mixed_ftp" = 1 ] && { twin_has_svc mixed-tls || twin_has_svc mixed-plain; }; then
+        need_ftp=1
+    fi
     if twin_has_svc mixed-tls || twin_has_svc mixed-plain; then need_mux=1; fi
     export TWIN_NEED_HTTP=$need_http TWIN_NEED_SOCKS=$need_socks TWIN_NEED_FTP=$need_ftp
 
@@ -293,10 +307,12 @@ twin_start() {
     if [ "$need_mux" = 1 ]; then
         [ -f "$BINDIR/tgmux" ] || { echo "[start] 缺少 $BINDIR/tgmux，请重新构建并安装。" >&2; return 1; }
     fi
-    [ -f "$TWIN_CERT_DIR/ttp.env" ] || {
-        echo "[start] 缺少证书，请先执行 'twingate certs' 或 tgmenu.sh 的证书生成。" >&2
+    # 没生成证书也允许启动：就地补一张自签证书并提示客户端需跳过校验。
+    if ! command -v twin_cert_ensure >/dev/null 2>&1; then
+        echo "[start] 找不到证书逻辑（scripts/cert.sh），无法启动。" >&2
         return 1
-    }
+    fi
+    twin_cert_ensure || return 1
     . "$TWIN_CERT_DIR/ttp.env"
 
     RUNDIR=$TWIN_RUN_DIR
@@ -311,19 +327,15 @@ twin_start() {
     mkdir -p "$RUNTIME_DIR"
     printf '%s\n' "$RUNTIME_DIR" > "$RUNDIR/runtime-dir"
     printf '%s\n' "$SERVICES" > "$RUNDIR/services"
+    if [ "$need_mux" = 1 ] && [ "$mixed_ftp" = 0 ]; then
+        printf '%s\n' "mixed-ftp: off (TWIN_MIXED_FTP=0)" >> "$RUNDIR/services"
+    fi
 
     # 上游 SOCKS5（parent 链式出口）：配置非法时直接拒绝启动。
     twin_parent_resolve || return 1
     twin_parent_write_state "$RUNDIR"
     if [ "${PARENT_ON:-0}" = 1 ]; then
         echo "[start] 上游 SOCKS5：$PARENT_DESC"
-    fi
-
-    # TUN 虚拟网卡接力：探测网卡与权限，结果写进运行状态供 status 显示。
-    twin_tun_resolve || return 1
-    twin_tun_write_state "$RUNDIR"
-    if [ "${TUN_ON:-0}" = 1 ]; then
-        echo "[start] TUN 接力：$(twin_tun_desc)"
     fi
 
     LISTEN_PORTS=""
@@ -342,12 +354,30 @@ twin_start() {
 
     BINS="3proxy ttp"
     [ "$need_mux" = 1 ] && BINS="$BINS tgmux"
+    # tgtun 也复制：安装目录可能落在 noexec 文件系统上（--prefix 到外置存储），
+    # 那时它存在但没有执行位。缺了不影响其它服务，所以只在存在时加进列表。
+    [ -f "$BINDIR/tgtun" ] && BINS="$BINS tgtun"
     for bin in $BINS; do
         tmpbin="$RUNTIME_DIR/$bin.new.$$"
         cp "$BINDIR/$bin" "$tmpbin" || return 1
-        chmod 755 "$tmpbin"
+        # noexec 下 chmod 会失败，但文件已经复制好了；能否执行由下面的 TUN 探测判断，
+        # 不能因为设不了权限位就中断启动（与 scripts/start.sh 保持一致）。
+        chmod 755 "$tmpbin" 2>/dev/null || :
         mv -f "$tmpbin" "$RUNTIME_DIR/$bin" || return 1
     done
+    # 让 tun.sh 优先用可执行目录里的那份，而不是可能在 noexec 上的安装目录。
+    if [ -f "$RUNTIME_DIR/tgtun" ] && [ -x "$RUNTIME_DIR/tgtun" ]; then
+        TWIN_TUN_BIN_RUN="$RUNTIME_DIR/tgtun"
+        export TWIN_TUN_BIN_RUN
+    fi
+
+    # TUN 虚拟网卡接力：必须放在"二进制已复制到可执行目录"之后，
+    # 否则 noexec 安装目录里那份 tgtun 会被判成不可执行。
+    twin_tun_resolve || return 1
+    twin_tun_write_state "$RUNDIR"
+    if [ "${TUN_ON:-0}" = 1 ]; then
+        echo "[start] TUN 接力：$(twin_tun_desc)"
+    fi
 
     if [ -e /system/bin/linker64 ]; then
         for bin in $BINS; do
@@ -372,6 +402,7 @@ twin_start() {
             TTP_TARGET_HOST=127.0.0.1 \
             TTP_TARGET_PORT="$target" \
             TTP_LOG_PATH="$TWIN_LOG_DIR/$name.log" \
+            TTP_SESSION_CACHE_KB="${TTP_SESSION_CACHE_KB:-256}" \
             TTP_SERVER_CERT_B64="$TTP_SERVER_CERT_B64" \
             TTP_SERVER_KEY_B64="$TTP_SERVER_KEY_B64" \
             "$RUNTIME_DIR/ttp" >"$TWIN_LOG_DIR/$name.out" 2>&1 &
@@ -384,9 +415,10 @@ twin_start() {
     fi
     if [ "$need_mux" = 1 ]; then
         export TWIN_MUX_PEEK_MS TWIN_MUX_FTP_GRACE_MS
+        if [ "$need_ftp" = 1 ]; then _mux_ftp=$TWIN_FTP_PLAIN; else _mux_ftp=0; fi
         twin_start_one tgmux "$RUNTIME_DIR/tgmux" \
             "$TWIN_MUX_PLAIN" "$TWIN_HTTP_PLAIN" "$TWIN_SOCKS_PLAIN" \
-            "$TWIN_FTP_PLAIN" "$TWIN_MUX_BIND"
+            "$_mux_ftp" "$TWIN_MUX_BIND"
     fi
     twin_has_svc http-tls   && twin_start_ttp ttp-http "$TWIN_HTTP_TLS" "$TWIN_HTTP_PLAIN"
     twin_has_svc socks-tls  && twin_start_ttp ttp-socks "$TWIN_SOCKS_TLS" "$TWIN_SOCKS_PLAIN"
@@ -410,220 +442,32 @@ twin_stop() {
     twin_sweep_orphans "$TWIN_RUN_DIR"
 }
 
-# 从运行中的 3proxy.cfg 里取 nserver 与超时，实际测一次解析。
+# 状态报告统一由 scripts/status.sh 提供（唯一实现），这里只做转发。
 #
-# 为什么要有这一段：`nserver` 是明文 UDP 53，不走 TUN 绑定，也未必能过上游代理。
-# 配了一个容器里根本到不了的 DNS（典型是 8.8.8.8）时，症状是"第一次好几秒、
-# 之后 2~3 秒"，而且 3proxy 自己不会报错——它只是等满 DNS_TO 再放弃。
-# 这里主动量一下，把"配置值 vs 实测"并排显示出来，一眼能看出是不是它。
-twin_status_dns() {
-    _dns_dir=$1
-    _cfg=""
-    for _c in "$TWIN_3PROXY_CFG" "$_dns_dir/3proxy.cfg"; do
-        [ -f "$_c" ] && { _cfg=$_c; break; }
-    done
-    [ -n "$_cfg" ] || return 0
-    _ns=$(sed -n 's/^nserver[[:space:]]*\([^[:space:]]*\).*/\1/p' "$_cfg" | head -1)
-    _tmo=$(sed -n 's/^timeouts[[:space:]]*//p' "$_cfg" | head -1)
-    [ -n "$_ns" ] || return 0
-    # 第 7 位是 DNS_TO，第 9 位是 CONNECT_TO
-    _dns_to=$(printf '%s\n' "$_tmo" | cut -d' ' -f7)
-    _conn_to=$(printf '%s\n' "$_tmo" | cut -d' ' -f9)
-
-    echo "=== DNS ==="
-    echo "nserver      $_ns（DNS_TO=${_dns_to:-?}s CONNECT_TO=${_conn_to:-?}s）"
-
-    # 去掉 :port，还原成主机名/地址；IPv6 的 [addr]:port 形式也照顾到。
-    _nshost=$_ns
-    case "$_ns" in
-        \[*\]:*) _nshost=${_ns%]:*} ;;      # [::1]:53
-        \[*\])   _nshost=${_ns#\[}; _nshost=${_nshost%\]} ;;
-        *:*:*)   : ;;                        # 裸 IPv6，端口是默认的 53
-        *:*)     _nshost=${_ns%:*} ;;
-    esac
-
-    # 真的发一个 DNS 查询，量往返时间。用 Python 而不是 getent/nslookup：
-    # 后两者走系统解析器、查缓存，量不到 3proxy 那条路径。
-    _py=""
-    for _cand in python3 python; do
-        command -v "$_cand" >/dev/null 2>&1 && { _py=$_cand; break; }
-    done
-    if [ -z "$_py" ]; then
-        echo "（没有 python，跳过解析实测；可用 nslookup 手工验证）"
-        return 0
-    fi
-    "$_py" - "$_nshost" "${_dns_to:-15}" <<'PY' 2>/dev/null || echo "解析实测失败（超时或不可达）"
-import socket, struct, sys, time
-
-host = sys.argv[1]
-dns_to = sys.argv[2]
-port = 53
-if host.startswith("[") and "]:" in host:
-    host, port = host[1:].split("]:")
-port = int(port)
-# 一个最小的 A 查询：example.com
-q = struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
-for label in b"example.com".split(b"."):
-    q += bytes([len(label)]) + label
-q += b"\x00" + struct.pack(">HH", 1, 1)
-
-s = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET,
-                  socket.SOCK_DGRAM)
-s.settimeout(6)
-t0 = time.perf_counter()
-try:
-    s.sendto(q, (host, port))
-    s.recvfrom(2048)
-    ms = (time.perf_counter() - t0) * 1000
-    print("实测解析     %.1f ms（example.com，明文 UDP）" % ms)
-except socket.timeout:
-    print("实测解析     超时 >6s —— 这个 DNS 从容器里到不了，")
-    print("             每次新域名都会等满 DNS_TO=" + dns_to + "s 才继续。")
-except OSError as e:
-    print("实测解析     失败：%s" % e)
-PY
-    case "$_dns_to" in
-        ''|*[!0-9]*) ;;
-        *)
-            if [ "$_dns_to" -ge 10 ]; then
-                echo "提示：DNS_TO 是 ${_dns_to}s，一旦解析不到就要干等这么久；"
-                echo "     把它收紧到 5（TWIN_DNS_TO=5），或换成本机可达的 DNS。"
-            fi
-            ;;
-    esac
-}
-
+# 以前两处各写一份：源码树的 status.sh 与安装模式的 twin_status 输出并不一致
+# （DNS 段只在后者里有），改一处漏一处。现在安装时把 status.sh 内嵌进启动器，
+# 两边跑的是同一份代码。
 twin_status() {
+    # 端口默认值来自 tui.env / 内嵌 ports.env，report 里要用。
     twin_ports_init
-    RUNDIR=$TWIN_RUN_DIR
-    if [ -f "$RUNDIR/listen-ports" ]; then
-        PORTS=$(cat "$RUNDIR/listen-ports")
-    else
-        PORTS="$TWIN_HTTP_TLS $TWIN_HTTP_PLAIN $TWIN_SOCKS_TLS $TWIN_SOCKS_PLAIN \
-$TWIN_FTP_TLS $TWIN_FTP_PLAIN $TWIN_MUX_PLAIN $TWIN_MIXED_TLS"
+    if ! command -v twin_status_report >/dev/null 2>&1; then
+        # 单独 source tg-runtime.sh（不经 tgmenu / 启动器）时的兜底。
+        for _st in "$TWIN_ROOT/status.sh" "$TWIN_ROOT/scripts/status.sh"; do
+            if [ -f "$_st" ]; then
+                . "$_st"
+                break
+            fi
+        done
     fi
-    PORT_RE=$(printf '%s\n' "$PORTS" | sed 's/^ *//; s/ *$//' | tr -s ' ' '|')
-
-    [ -f "$RUNDIR/runtime-dir" ] && { echo "=== RUNTIME ==="; cat "$RUNDIR/runtime-dir"; }
-    [ -f "$RUNDIR/services" ] && { echo "=== SERVICES ==="; cat "$RUNDIR/services"; }
-    [ -f "$RUNDIR/parent" ] && { echo "=== PARENT ==="; cat "$RUNDIR/parent"; }
-    [ -f "$RUNDIR/tun" ] && { echo "=== TUN ==="; cat "$RUNDIR/tun"; }
-    twin_status_dns "$RUNDIR"
-
-    echo "=== PID ==="
-    for pidfile in "$RUNDIR"/*.pid; do
-        [ -f "$pidfile" ] || continue
-        pid=$(cat "$pidfile" 2>/dev/null || true)
-        name=$(basename "$pidfile" .pid)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            echo "OK   $name $pid"
-        else
-            echo "DEAD $name $pid"
-        fi
-    done
-
-    echo "=== LISTEN ==="
-    if [ -z "$PORT_RE" ]; then
-        echo "（未开放任何端口）"
-    elif command -v ss >/dev/null 2>&1; then
-        ss -ltnp 2>/dev/null | grep -E ":($PORT_RE)" || true
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -ltnp 2>/dev/null | grep -E ":($PORT_RE)" || true
-    else
-        echo "无 ss/netstat，可用: cat /proc/net/tcp"
+    if ! command -v twin_status_report >/dev/null 2>&1; then
+        echo "找不到 scripts/status.sh，无法显示状态。" >&2
+        return 1
     fi
-
-    echo "=== LOG TAIL ==="
-    for f in "$TWIN_LOG_DIR"/*.out; do
-        [ -f "$f" ] || continue
-        echo "--- $(basename "$f")"
-        tail -n 10 "$f" 2>/dev/null || true
-    done
+    twin_status_report
 }
 
 # ---------------------------------------------------------------- 证书
 
-twin_gen_certs() {
-    command -v openssl >/dev/null 2>&1 || { echo "需要 openssl" >&2; return 1; }
-    CERTDIR=$TWIN_CERT_DIR
-    DAYS=${TWIN_CERT_DAYS:-365}
-    CA_DAYS=${TWIN_CERT_CA_DAYS:-3650}
-    CN=${TWIN_CERT_CN:-TwinGate}
-    CA_CN=${TWIN_CERT_CA_CN:-TwinGate Local CA}
-    mkdir -p "$CERTDIR" || return 1
-
-    twin_detect_ips() {
-        if command -v ip >/dev/null 2>&1; then
-            ip -4 -o addr show 2>/dev/null | sed -n 's/.*inet \([0-9][0-9.]*\)\/.*/\1/p'
-        elif command -v hostname >/dev/null 2>&1; then
-            hostname -I 2>/dev/null | tr ' ' '\n'
-        fi
-    }
-    SAN="DNS:localhost,IP:127.0.0.1"
-    for ip in $(twin_detect_ips | sed 's/^ *//; s/ *$//' | sort -u); do
-        [ -z "$ip" ] && continue
-        [ "$ip" = 127.0.0.1 ] && continue
-        case "$ip" in 169.254.*) continue ;; esac
-        case ",$SAN," in *",IP:$ip,"*) ;; *) SAN="$SAN,IP:$ip" ;; esac
-    done
-    oifs=$IFS; IFS=,
-    for x in ${TWIN_CERT_IPS:-}; do
-        [ -z "$x" ] && continue
-        case ",$SAN," in *",IP:$x,"*) ;; *) SAN="$SAN,IP:$x" ;; esac
-    done
-    for x in ${TWIN_CERT_DNS:-}; do
-        [ -z "$x" ] && continue
-        case ",$SAN," in *",DNS:$x,"*) ;; *) SAN="$SAN,DNS:$x" ;; esac
-    done
-    IFS=$oifs
-    echo "[cert] SAN: $SAN"
-
-    if [ ! -f "$CERTDIR/ca.key" ] || [ ! -f "$CERTDIR/ca.crt" ]; then
-        openssl ecparam -name prime256v1 -genkey -noout -out "$CERTDIR/ca.key" || return 1
-        cat > "$CERTDIR/ca.cnf" <<EOF
-[req]
-distinguished_name = dn
-x509_extensions = v3_ca
-prompt = no
-[dn]
-CN = $CA_CN
-[v3_ca]
-basicConstraints = critical,CA:TRUE
-keyUsage = critical,keyCertSign,cRLSign
-subjectKeyIdentifier = hash
-EOF
-        openssl req -new -x509 -key "$CERTDIR/ca.key" -out "$CERTDIR/ca.crt" \
-            -days "$CA_DAYS" -config "$CERTDIR/ca.cnf" 2>/dev/null || return 1
-        echo "[cert] 已生成本地 CA：$CERTDIR/ca.crt"
-    fi
-
-    openssl ecparam -name prime256v1 -genkey -noout -out "$CERTDIR/server.key" || return 1
-    openssl req -new -key "$CERTDIR/server.key" -out "$CERTDIR/server.csr" \
-        -subj "/CN=$CN" 2>/dev/null || return 1
-    cat > "$CERTDIR/server.cnf" <<EOF
-[v3_server]
-basicConstraints = CA:FALSE
-keyUsage = digitalSignature,keyEncipherment
-extendedKeyUsage = serverAuth
-subjectAltName = $SAN
-subjectKeyIdentifier = hash
-authorityKeyIdentifier = keyid,issuer
-EOF
-    rm -f "$CERTDIR/server.srl"
-    openssl x509 -req -in "$CERTDIR/server.csr" \
-        -CA "$CERTDIR/ca.crt" -CAkey "$CERTDIR/ca.key" -CAcreateserial \
-        -out "$CERTDIR/server.crt" -days "$DAYS" \
-        -extfile "$CERTDIR/server.cnf" -extensions v3_server 2>/dev/null || return 1
-
-    cat "$CERTDIR/server.crt" "$CERTDIR/ca.crt" > "$CERTDIR/server-chain.crt"
-    b64() { base64 "$1" | tr -d '\n'; }
-    printf 'TTP_SERVER_CERT_B64=%s\n' "$(b64 "$CERTDIR/server-chain.crt")" > "$CERTDIR/ttp.env"
-    printf 'TTP_SERVER_KEY_B64=%s\n' "$(b64 "$CERTDIR/server.key")" >> "$CERTDIR/ttp.env"
-    # ttp.env 里有服务器私钥的 base64，和 *.key 一样只给属主读。
-    chmod 600 "$CERTDIR/ca.key" "$CERTDIR/server.key" "$CERTDIR/ttp.env" 2>/dev/null || :
-    echo "[cert] 完成：$CERTDIR"
-    echo "[cert] 客户端信任文件：$CERTDIR/ca.crt"
-}
 
 twin_install_ca() {
     CA=${1:-$TWIN_CERT_DIR/ca.crt}
@@ -674,4 +518,79 @@ twin_install_ca() {
             echo "[install-ca] 平台 $os，请手工把 $CA 导入系统/浏览器信任库。"
             ;;
     esac
+}
+
+# ---------------------------------------------------------------- 卸载
+# 安装模式下 'twingate uninstall' 自己就能把装出去的东西删掉：启动器是单个脚本，
+# 知道 $TWIN_PREFIX / $TWIN_ROOT / 配置与数据目录，不需要再回源码树找 uninstall.sh。
+# 默认保留配置和数据（证书在这里，误删代价大），--purge 才一起清。
+twin_uninstall() {
+    _un_purge=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --purge) _un_purge=1; shift ;;
+            -h|--help)
+                printf '%s\n' '用法: twingate uninstall [--purge]'
+                printf '%s\n' '  默认保留配置目录与数据目录（含证书）；--purge 一并删除。'
+                return 0 ;;
+            *) printf '[uninstall] 未知参数: %s\n' "$1" >&2; return 1 ;;
+        esac
+    done
+
+    if [ "${TWIN_INSTALLED:-0}" != 1 ]; then
+        printf '[uninstall] 当前不是安装模式；源码树请用 sh scripts/uninstall.sh。\n' >&2
+        return 1
+    fi
+
+    # 兜底：宁可拒绝也不删错目录。TWIN_ROOT 必须正好是 <prefix>/lib/twingate。
+    _un_lib=$TWIN_PREFIX/lib/twingate
+    case "${TWIN_PREFIX:-}" in
+        ""|/|"${HOME:-/nonexistent}"|"${HOME:-/nonexistent}/")
+            printf '[uninstall] 安装前缀异常（%s），拒绝删除。\n' "${TWIN_PREFIX:-空}" >&2
+            return 1 ;;
+    esac
+    if [ "$(cd -- "$TWIN_ROOT" 2>/dev/null && pwd)" != "$(cd -- "$_un_lib" 2>/dev/null && pwd)" ]; then
+        printf '[uninstall] 程序目录不符合预期（%s），拒绝删除。\n' "$TWIN_ROOT" >&2
+        return 1
+    fi
+
+    _un_bin=$TWIN_PREFIX/bin/twingate
+    if [ ! -e "$_un_bin" ] && [ ! -d "$TWIN_ROOT" ]; then
+        printf '[uninstall] 没有找到安装：%s\n' "$TWIN_PREFIX"
+        return 0
+    fi
+
+    # 先停进程：删除二进制后旧进程仍会占着端口，用户会以为"没卸干净"。
+    twin_stop >/dev/null 2>&1 || :
+
+    for _un_f in 3proxy ttp tgmux tgtun; do
+        rm -f "$TWIN_ROOT/$_un_f" 2>/dev/null || :
+    done
+    # 只删这四个二进制，其它文件（用户自己塞的）不动，目录非空时 rmdir 会自动留下。
+    rmdir "$TWIN_ROOT" 2>/dev/null || :
+    rmdir "$TWIN_PREFIX/lib" 2>/dev/null || :
+    printf '[uninstall] 已移除 %s 与 %s\n' "$_un_lib" "$_un_bin"
+    # 启动器放在最后删：正在执行的脚本即便被 unlink 也能继续跑完。
+    rm -f "$_un_bin" 2>/dev/null || :
+
+    if [ "$_un_purge" = 1 ]; then
+        _un_old=${HOME:-/tmp}/.local/config/twingate
+        for _un_d in "$TWIN_CONFIG_DIR" "$TWIN_DATA"; do
+            case "$_un_d" in
+                ""|/|"${HOME:-/nonexistent}"|"${HOME:-/nonexistent}/")
+                    printf '[uninstall] 目录值异常（%s），拒绝删除。\n' "$_un_d" >&2
+                    return 1 ;;
+            esac
+        done
+        rm -rf "$TWIN_CONFIG_DIR" "$TWIN_DATA"
+        printf '[uninstall] 已删除配置目录 %s 与数据目录 %s\n' "$TWIN_CONFIG_DIR" "$TWIN_DATA"
+        if [ "$_un_old" != "$TWIN_CONFIG_DIR" ] && [ -d "$_un_old" ]; then
+            rm -rf "$_un_old"
+            printf '[uninstall] 已删除旧版配置目录 %s\n' "$_un_old"
+        fi
+    else
+        printf '[uninstall] 配置目录已保留: %s\n' "$TWIN_CONFIG_DIR"
+        printf '[uninstall] 数据目录已保留: %s（含证书，--purge 才会删）\n' "$TWIN_DATA"
+    fi
+    return 0
 }

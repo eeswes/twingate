@@ -1,0 +1,4 @@
+# ttp-session-cache 应用后源码里必须出现的代码。格式：<文件>:<原文片段>（-F 精确匹配）
+ttp.c:cache_kb = 256
+ttp.c:TLS session cache: %zu KiB
+ttp.c:TTP_SESSION_CACHE_KB

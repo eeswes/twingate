@@ -1,0 +1,4 @@
+# ttp-nodelay 应用后源码里必须出现的代码。格式：<文件>:<原文片段>（-F 精确匹配）
+ttp.c:static void set_tcp_nodelay(int fd)
+ttp.c:set_tcp_nodelay(target_sock)
+ttp.c:set_tcp_nodelay(ssl_sock)

@@ -8,6 +8,8 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$ROOT/scripts/paths.sh"
 twin_init_paths "$0"
 . "$ROOT/scripts/lifecycle.sh"
+# 证书生成与"缺了就补一张"的共用实现（与安装模式的 twingate certs 同一份）。
+. "$ROOT/scripts/cert.sh"
 # 记录是否由用户显式指定各协议绑定地址（要在加载 tui.env / ports.env 之前）。
 _explicit_http_bind=${TWIN_HTTP_BIND+x}
 _explicit_socks_bind=${TWIN_SOCKS_BIND+x}
@@ -90,8 +92,17 @@ if has_service socks-plain || has_service socks-tls || \
    has_service mixed-plain || has_service mixed-tls; then
     need_socks=1
 fi
-if has_service ftp-plain || has_service ftp-tls || \
-   has_service mixed-plain || has_service mixed-tls; then
+# 混合端口默认带 FTP。TWIN_MIXED_FTP=0 时这一路整段关掉：tgmux 只分
+# HTTP/SOCKS，ftppr 不监听也不进配置——不需要 FTP 的那段时间里少一路监听、
+# 少一次"沉默客户端要等 banner"的判断。
+case "${TWIN_MIXED_FTP:-1}" in
+    0|off|no|false) mixed_ftp=0 ;;
+    *)              mixed_ftp=1 ;;
+esac
+if has_service ftp-plain || has_service ftp-tls; then
+    need_ftp=1
+fi
+if [ "$mixed_ftp" = 1 ] && { has_service mixed-plain || has_service mixed-tls; }; then
     need_ftp=1
 fi
 if has_service mixed-plain || has_service mixed-tls; then
@@ -115,21 +126,31 @@ export TWIN_HTTP_BIND TWIN_SOCKS_BIND TWIN_FTP_BIND
 BINDIR=$(twin_bin_dir)
 # 这里只区分"文件不存在"和"存在但不可执行"：后者在 /sdcard 这类 noexec
 # 目录上很常见，下面的复制步骤会把它搬到可执行目录并 chmod，所以不算错误。
+#
+# 注意不能写成 `twin_bin_state ...; if [ $? = 1 ]`：本脚本是 set -e，函数一返回
+# 非零，脚本当场就退出，那句提示永远打不出来（曾经的实际 bug）。用 `|| _rc=$?`
+# 先把返回码接住再判断。
+_rc=0
 for _b in 3proxy ttp; do
-    twin_bin_state "$BINDIR/$_b"
-    if [ $? = 1 ]; then
+    twin_bin_state "$BINDIR/$_b" || _rc=$?
+    if [ "$_rc" = 1 ]; then
         echo "缺少 $_b（$BINDIR/$_b）。请先执行：sh scripts/build.sh" >&2
         exit 1
     fi
+    _rc=0
 done
 if [ "$need_mux" = 1 ]; then
-    twin_bin_state "$BINDIR/tgmux"
-    if [ $? = 1 ]; then
+    twin_bin_state "$BINDIR/tgmux" || _rc=$?
+    if [ "$_rc" = 1 ]; then
         echo "缺少 tgmux（$BINDIR/tgmux），混合模式需要它。请先执行：sh scripts/build.sh" >&2
         exit 1
     fi
+    _rc=0
 fi
-[ -f "$CERTDIR/ttp.env" ] || { echo "缺少证书，请先执行 scripts/gen-certs.sh" >&2; exit 1; }
+# 没生成证书也允许启动：就地补一张自签证书，并提示客户端需跳过校验。
+TWIN_CERT_DIR=$CERTDIR
+export TWIN_CERT_DIR
+twin_cert_ensure || exit 1
 . "$CERTDIR/ttp.env"
 
 check_exec_dir() {
@@ -173,6 +194,9 @@ RUNTIME_DIR=$(find_runtime_dir) || {
 mkdir -p "$RUNTIME_DIR"
 printf '%s\n' "$RUNTIME_DIR" > "$RUNDIR/runtime-dir"
 printf '%s\n' "$SERVICES" > "$RUNDIR/services"
+if [ "$need_mux" = 1 ] && [ "$mixed_ftp" = 0 ]; then
+    printf '%s\n' "mixed-ftp: off (TWIN_MIXED_FTP=0)" >> "$RUNDIR/services"
+fi
 
 # 记录本次真正对外监听的端口，供 status.sh 显示（可包含命令行临时覆盖值）。
 LISTEN_PORTS=""
@@ -248,6 +272,7 @@ start_ttp() {
         TTP_TARGET_HOST=127.0.0.1 \
         TTP_TARGET_PORT="$target" \
         TTP_LOG_PATH="$TWIN_LOG_DIR/$name.log" \
+        TTP_SESSION_CACHE_KB="${TTP_SESSION_CACHE_KB:-256}" \
         TTP_SERVER_CERT_B64="$TTP_SERVER_CERT_B64" \
         TTP_SERVER_KEY_B64="$TTP_SERVER_KEY_B64" \
         "$RUNTIME_DIR/ttp" >"$TWIN_LOG_DIR/$name.out" 2>&1 &
@@ -261,9 +286,11 @@ fi
 
 if [ "$need_mux" = 1 ]; then
     export TWIN_MUX_PEEK_MS TWIN_MUX_FTP_GRACE_MS
+    # 第 4 个参数是 FTP 后端端口：0 表示这个混合端口不含 FTP。
+    if [ "$need_ftp" = 1 ]; then _mux_ftp=$TWIN_FTP_PLAIN; else _mux_ftp=0; fi
     start_one tgmux "$RUNTIME_DIR/tgmux" \
         "$TWIN_MUX_PLAIN" "$TWIN_HTTP_PLAIN" "$TWIN_SOCKS_PLAIN" \
-        "$TWIN_FTP_PLAIN" "$TWIN_MUX_BIND"
+        "$_mux_ftp" "$TWIN_MUX_BIND"
 fi
 
 if has_service http-tls; then

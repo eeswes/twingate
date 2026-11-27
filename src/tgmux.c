@@ -13,6 +13,10 @@
  * Usage:
  *   tgmux <listen_port> <http_port> <socks_port> <ftp_port> [bind_addr]
  *
+ *   <ftp_port> = 0 turns the FTP arm off (TWIN_MIXED_FTP=0): nothing ever
+ *   connects to ftppr, and a client that stays mute is taken as HTTP instead
+ *   of racing the 220 greeting.
+ *
  * Environment:
  *   TWIN_MUX_PEEK_MS   upper bound for the greeting race (default 500)
  *   TWIN_MUX_FTP_GRACE_MS   grace after the 220 banner before declaring FTP
@@ -186,11 +190,21 @@ static int send_all(int fd, const unsigned char *buf, size_t len)
     return 0;
 }
 
-/* Full-duplex relay with half-close support. */
+/* Full-duplex relay with half-close support.
+ *
+ * 缓冲按需升级。tgmux 是 fork-per-connection，每条连接都在子进程栈上开 16KB
+ * 等于白占 4 页物理内存；而绝大多数连接（HTTPS 控制通道、DNS、小请求）一次
+ * 只走几百字节。这里先用 4KB（1 页），某次读满才 malloc 升级到 16KB ——
+ * 大流量（下载/上传）照旧用大缓冲，小连接不多占。
+ * 缓冲是子进程私有的，malloc 出来的大缓冲不会和父进程共享，也不会产生 COW。 */
+#define RELAY_BUF_SMALL 4096
+#define RELAY_BUF_LARGE 16384
+
 static void relay(int cli, int srv)
 {
     struct pollfd fds[2];
-    unsigned char buf[16384];
+    unsigned char small[RELAY_BUF_SMALL];
+    unsigned char *large = NULL;
     int cli_open = 1, srv_open = 1;
 
     fds[0].fd = cli;
@@ -208,15 +222,23 @@ static void relay(int cli, int srv)
         }
         for (i = 0; i < 2; i++) {
             int src, dst;
+            unsigned char *buf;
+            size_t cap;
             ssize_t n;
             if (fds[i].revents == 0)
                 continue;
             src = fds[i].fd;
             dst = (i == 0) ? srv : cli;
-            n = recv(src, buf, sizeof(buf), 0);
+            buf = large ? large : small;
+            cap = large ? RELAY_BUF_LARGE : RELAY_BUF_SMALL;
+            n = recv(src, buf, cap, 0);
             if (n > 0) {
                 if (send_all(dst, buf, (size_t)n) != 0)
                     goto done;
+                /* 一次读满 ⇒ 这是大流量连接，升级缓冲以减少收发次数。
+                   分配失败就继续用小缓冲，只是多几次系统调用。 */
+                if (!large && (size_t)n == cap)
+                    large = malloc(RELAY_BUF_LARGE);
                 continue;
             }
             if (n == 0) {
@@ -239,6 +261,7 @@ static void relay(int cli, int srv)
     }
 
 done:
+    free(large);
     shutdown(cli, SHUT_RDWR);
     shutdown(srv, SHUT_RDWR);
     close(cli);
@@ -253,7 +276,9 @@ static int classify(const unsigned char *b, int hp, int sp, int fp,
         *kind = "socks";
         return sp;
     }
-    if (b[0] == 'U' || b[0] == 'u' || b[0] == 'O' || b[0] == 'o') {
+    /* fp<=0：这台混合端口不含 FTP（TWIN_MIXED_FTP=0）。此时首字节像 FTP 的
+       只可能是 HTTP 方法（PUT / OPTIONS），照 HTTP 转发。 */
+    if (fp > 0 && (b[0] == 'U' || b[0] == 'u' || b[0] == 'O' || b[0] == 'o')) {
         *kind = "ftp";
         return fp;
     }
@@ -273,6 +298,9 @@ static int classify(const unsigned char *b, int hp, int sp, int fp,
  * 为什么需要宽限：沉默的 FTP 客户端和浏览器的 preconnect（提前建连、暂不发请求）
  * 在报文层面完全一样，只能靠时间区分。宽限就是这段不可区分区间的长度——
  * 原来固定盲等 500ms，现在 FTP 的首个响应从 500ms 降到「banner 到达 + 宽限」。
+ *
+ * 关掉 FTP（ftp_port=0）时上面这段竞速整段不存在：沉默只可能是 preconnect，
+ * 等一小段观察窗口（沿用 ftp_grace_ms）后直接交给 HTTP。
  */
 static void handle_client(int cli, int hp, int sp, int fp, const char *host)
 {
@@ -294,18 +322,33 @@ static void handle_client(int cli, int hp, int sp, int fp, const char *host)
     if (n < 0)
         n = 0;
 
-    if (n == 0) {
+    if (n == 0 && fp <= 0) {
+        /*
+         * 没有 FTP 这一路，就不存在"沉默的可能是 FTP"的歧义：沉默只剩浏览器的
+         * preconnect 一种解释。仍留一小段观察窗口（真客户端建连即发首包），
+         * 窗口一过就当 HTTP 发出去——不连 ftppr、不竞速、不扣 banner。
+         */
+        p[0].fd = cli;
+        p[0].events = POLLIN;
+        p[0].revents = 0;
+        if (ftp_grace_ms > 0 && poll(p, 1, ftp_grace_ms) > 0 &&
+            (p[0].revents & (POLLIN | POLLHUP)))
+            n = recv(cli, buf, sizeof(buf), MSG_PEEK);
+        if (n < 0)
+            n = 0;
+    }
+
+    /*
+     * 沉默客户端 + 这台端口带 FTP：先连 ftppr 再看谁先开口。
+     *
+     * 连不上 ftppr（没起来 / 被裁掉）时**不要丢掉客户端**：沉默的客户端本来
+     * 就可能是浏览器的 preconnect，落到下面的 HTTP 分支至少还能正常服务。
+     * 所以把连接直接写进条件里，失败就让 ftp_sock=-1、走通用路径。
+     */
+    if (n == 0 && fp > 0 && (ftp_sock = connect_backend(host, fp)) >= 0) {
         struct timespec t0;
         long elapsed, limit;
         int have_banner = 0;
-
-        ftp_sock = connect_backend(host, fp);
-        if (ftp_sock < 0) {
-            fprintf(stderr, "[tgmux] cannot connect ftp backend %s:%d\n",
-                    host, fp);
-            close(cli);
-            return;
-        }
 
         p[0].fd = cli;
         p[0].events = POLLIN;
@@ -372,10 +415,15 @@ static void handle_client(int cli, int hp, int sp, int fp, const char *host)
                 if (!have_banner) {
                     blen = recv(ftp_sock, banner, sizeof(banner), 0);
                     if (blen <= 0) {
-                        /* ftppr 没吐 banner 就关了，只能让客户端看到断开 */
-                        close(cli);
+                        /*
+                         * ftppr 没吐 banner 就关了（没起来 / 配置被裁掉 / 崩了）。
+                         * 这里不要连客户端一起丢掉：沉默的客户端本来就可能是浏览器
+                         * 的 preconnect，交给 HTTP 后端至少还能正常服务。
+                         */
                         close(ftp_sock);
-                        return;
+                        ftp_sock = -1;
+                        n = 0;
+                        break;
                     }
                     have_banner = 1;
                     clock_gettime(CLOCK_MONOTONIC, &t0);  /* 宽限从这里算 */
@@ -398,7 +446,13 @@ static void handle_client(int cli, int hp, int sp, int fp, const char *host)
         }
     }
 
-    target_port = classify(buf, hp, sp, fp, &kind);
+    if (n > 0) {
+        target_port = classify(buf, hp, sp, fp, &kind);
+    } else {
+        /* 沉默且没有 FTP：按 HTTP 发出去，3proxy 那边会等客户端说话。 */
+        target_port = hp;
+        kind = "http";
+    }
 
     /* 已判定为 FTP 时复用竞速阶段那条连接，避免再握一次手。 */
     if (target_port == fp && ftp_sock >= 0) {
@@ -466,7 +520,8 @@ int main(int argc, char **argv)
         return 2;
     }
     if (!valid_port(argv[1]) || !valid_port(argv[2]) ||
-        !valid_port(argv[3]) || !valid_port(argv[4])) {
+        !valid_port(argv[3]) ||
+        !(valid_port(argv[4]) || strcmp(argv[4], "0") == 0)) {
         usage(argv[0]);
         return 2;
     }
@@ -524,9 +579,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    fprintf(stderr,
-            "[tgmux] listening on %s:%d -> http:%d socks:%d ftp:%d (peek=%dms grace=%dms)\n",
-            bind_addr, listen_port, hp, sp, fp, peek_ms, ftp_grace_ms);
+    if (fp > 0)
+        fprintf(stderr,
+                "[tgmux] listening on %s:%d -> http:%d socks:%d ftp:%d (peek=%dms grace=%dms)\n",
+                bind_addr, listen_port, hp, sp, fp, peek_ms, ftp_grace_ms);
+    else
+        fprintf(stderr,
+                "[tgmux] listening on %s:%d -> http:%d socks:%d ftp:off (silent=%dms)\n",
+                bind_addr, listen_port, hp, sp, ftp_grace_ms);
 
     for (;;) {
         int cli = accept(ls, NULL, NULL);

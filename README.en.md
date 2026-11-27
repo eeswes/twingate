@@ -71,6 +71,21 @@ TWIN_MIXED=1 sh scripts/start.sh
 python3 tests/tg_probe.py --mixed --mode all --target example.com
 ```
 
+### Turning FTP off on the mixed port
+
+`TWIN_MIXED_FTP=0` leaves the mixed port with HTTP / SOCKS only: `ftppr` stops listening,
+the `ftp` section disappears from the generated config, and `tgmux` never connects to it. A
+silent client (a browser preconnect) is handed to HTTP after `TWIN_MUX_FTP_GRACE_MS`, skipping
+the 220-banner race entirely.
+
+```sh
+TWIN_SERVICES=mixed-tls,mixed-plain TWIN_MIXED_FTP=0 sh scripts/start.sh
+```
+
+The TUI toggle is "Config -> 13) Mixed FTP". The trade-off is real: that port no longer speaks
+FTP, so an FTP client gets no `220` and is treated as HTTP. `twingate status` marks it with
+`mixed-ftp: off` under `=== SERVICES ===`.
+
 ### Choosing which ports to open
 
 `TWIN_SERVICES` is a comma-separated list that decides which listeners are actually
@@ -233,6 +248,12 @@ installation. The SAN automatically includes `localhost`, `127.0.0.1` and every 
 detected on the machine at generation time. Clients only need to import one file, `ca.crt`;
 afterwards TLS connections no longer need `--insecure`.
 
+**You can start without generating certificates first**: `start` mints one on the spot and prints
+a reminder. That certificate is brand new, so clients do not trust it — when going through the
+`https://` proxy you must skip verification: `curl` needs `--proxy-insecure` (note `-k` only covers
+the target site, not an `https://` proxy), browsers/Electron need `--ignore-certificate-errors`.
+Run `twingate certs` + `twingate trust` afterwards to get normal verification.
+
 ```sh
 sh scripts/gen-certs.sh                  # create/update; the CA is reused
 sh scripts/install-ca.sh                 # automatic install on Linux/Termux/macOS/Windows
@@ -275,8 +296,10 @@ Measured on docker0, 30 consecutive connections: full handshake ≈3.0ms, resume
 with the cache off all 30 were full handshakes. 24 concurrent handshakes completed without
 failures, so the lock keeps the LRU index intact.
 
-Cache size is `TTP_SESSION_CACHE_KB` (64 by default, ~650 sessions; `0` disables it). A
-smaller cache only lowers the hit rate, never correctness.
+Cache size is `TTP_SESSION_CACHE_KB` (**256 by default**, ~2600 sessions; `0` disables it,
+8192 = 8MB is the cap). It is also in the TUI under Config → 14) TLS cache. Each session
+costs a fixed 100 bytes, so 256KB of shared pages is nothing next to 3proxy's 64KB of
+per-connection relay buffers; shrinking it only lowers the hit rate, never correctness.
 
 ### Timeouts: why the tunnel "sometimes" fails
 
@@ -370,10 +393,23 @@ do not need FTP.
 
 `vendor/` is not tracked, so upstream changes live in `vendor-patches/`:
 `ttp-nodelay.patch` and `ttp-session-cache.patch`. `fetch-vendor.sh` and `build.sh` apply them
-in order and idempotently before compiling, so re-fetching upstream never loses them. Without
-a `patch` command the build fails loudly instead of silently shipping the slow version.
+in order and idempotently before compiling, so re-fetching upstream never loses them.
 **Editing files under `vendor/` without updating the matching patch means the next
 `make vendor` throws the change away.**
+
+"patch exited 0" is not proof the patch landed. Three checks run, and any failure stops the build:
+
+1. **Integrity** — `vendor-patches/SHA256SUMS` pins the content hash of every patch; a truncated
+   or hand-edited patch fails immediately (regenerate after editing: `sh scripts/vendor-patch.sh`).
+2. **Both directions** — reverse `patch --dry-run` must succeed (the code really is there) and
+   forward dry-run must fail (otherwise it could be applied again, meaning the last apply never
+   wrote anything).
+3. **Expected code** — `<patch>.expect` lists snippets that must exist afterwards (e.g.
+   `ttp.c:cache_kb = 256`), checked with `grep -F`, so a half-applied patch cannot slip through.
+
+When a patch does not apply, every file it touches is reported as `已含补丁` / `未打补丁` /
+`部分匹配`. A multi-file patch (`ttp-session-cache` touches 3 files) reverts to a half-applied
+state if only one file is restored; fix with `git -C vendor/ttp checkout -- .` and rebuild.
 
 ## Layout
 
@@ -381,7 +417,8 @@ a `patch` command the build fails loudly instead of silently shipping the slow v
 - `scripts/vendor-patch.sh` — apply local patches to upstream sources idempotently (see `vendor-patches/`)
 - `scripts/build.sh` — build; output in `dist/` (`3proxy`, `ttp`, `tgmux`, `tgtun`)
 - `src/tgmux.c` — protocol dispatcher for the mixed single-port mode
-- `scripts/gen-certs.sh` — generate the local CA + server chain + `run/certs/ttp.env`
+- `scripts/gen-certs.sh` — CLI entry for the local CA + server chain + `run/certs/ttp.env`
+- `scripts/cert.sh` — the single implementation of cert generation and on-demand minting (embedded into `twingate` at install time)
 - `scripts/install-ca.sh` — install `ca.crt` into the current system trust store
 - `scripts/render-config.sh` — render `run/3proxy.cfg` from the template (auth + upstream parent)
 - `scripts/start.sh` / `stop.sh` / `status.sh` — process management
@@ -408,7 +445,7 @@ Layout (default user-level install):
 | --- | --- |
 | Command | `~/.local/bin/twingate` |
 | Programs (binaries only) | `~/.local/lib/twingate/` |
-| Config (`tui.env`, `3proxy.cfg`) | `~/.local/config/twingate/` |
+| Config (`tui.env`, `3proxy.cfg`) | `~/.config/twingate/` (the old `~/.local/config/twingate/` is migrated on reinstall) |
 | Data (certs, logs, PID files) | `~/.local/share/twingate/` |
 
 ```sh
@@ -440,9 +477,13 @@ twingate trust        # import ca.crt into the local trust store
 twingate help         # list all subcommands
 ```
 
-Full list: `start` / `stop` / `restart` / `status` / `config` / `build` / `certs` / `trust` / `probe` / `selftest` / `install` / `uninstall` / `help` / `version`. `build`, `probe`, `selftest`, `install` and `uninstall` require the source tree (`twingate` will tell you so), since the installed form carries binaries only. Environment overrides still work, e.g. `TWIN_AUTH=0 twingate start`.
+Full list: `start` / `stop` / `restart` / `status` / `config` / `build` / `certs` / `trust` / `probe` / `selftest` / `install` / `uninstall` / `help` / `version`. `build`, `probe`, `selftest` and `install` require the source tree (`twingate` will tell you so), since the installed form carries binaries only. Environment overrides still work, e.g. `TWIN_AUTH=0 twingate start`.
 
-Uninstall keeps config and data: `make uninstall`; to remove them too: `sh scripts/uninstall.sh --purge`.
+Uninstalling works straight from the installed command — no need to go back to the source tree:
+`twingate uninstall` stops the processes, removes the launcher and the binaries under
+`lib/twingate`, and keeps config and data (including certificates);
+`twingate uninstall --purge` removes those as well. In the source tree the equivalents are
+`make uninstall` / `sh scripts/uninstall.sh --purge`.
 
 > Inside an Android/ReDroid container, `twingate start` must still **run as root** (`adb shell` then `su` in Termux) — see below.
 

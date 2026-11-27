@@ -9,7 +9,7 @@
 +	 * 只有 fork 之前分配的共享映射才能被子进程共用。
 +	 */
 +	{
-+		size_t cache_kb = 64;
++		size_t cache_kb = 256;
 +		const char *cache_env = getenv("TTP_SESSION_CACHE_KB");
 +
 +		if (cache_env != NULL && *cache_env != '\0') {
